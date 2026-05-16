@@ -22,6 +22,27 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 // Path to the WSF CLI binary (installed by the user at ~/.local/bin/wsf)
 const WSF_PATH = GLib.getenv('HOME') + '/.local/bin/wsf';
 
+// Set to true for verbose logging (useful for debugging, disable for production)
+const DEBUG = false;
+
+/**
+ * Logs a message to the journal only when DEBUG is enabled.
+ *
+ * @param {string} message - The log message.
+ */
+function log(msg) {
+    if (DEBUG) console.log('[TouchpadSpeed] ' + msg);
+}
+
+/**
+ * Logs an error to the journal only when DEBUG is enabled.
+ *
+ * @param {string} message - The error message.
+ */
+function logError(msg) {
+    if (DEBUG) console.error('[TouchpadSpeed] ' + msg);
+}
+
 /**
  * TouchpadSpeedControlExtension
  *
@@ -44,38 +65,38 @@ export default class TouchpadSpeedControlExtension extends Extension {
      *   6. Trigger initial factor application
      */
     enable() {
-        console.log('[TouchpadSpeed] ===== ENABLE CALLED =====');
+        log('===== ENABLE CALLED =====');
 
         try {
             // Step 1: Verify WSF binary exists
             const wsfFile = Gio.File.new_for_path(WSF_PATH);
             if (!wsfFile.query_exists(null)) {
-                console.error('[TouchpadSpeed] WSF NOT FOUND: ' + WSF_PATH);
+                logError('WSF NOT FOUND: ' + WSF_PATH);
                 this._showNotification(
                     'WSF Not Installed',
                     'Touchpad Speed Control requires Wayland Scroll Factor (WSF). Please install it first.'
                 );
                 return;
             }
-            console.log('[TouchpadSpeed] WSF found');
+            log('WSF found');
 
             // Step 2: Verify WSF preload is active
             // This checks both "enabled: yes" and "gnome-shell library mapped: yes"
             // from `wsf status` output. Without preload, `wsf set` commands do nothing.
             const wsfActive = this._checkWSFStatus();
             if (!wsfActive) {
-                console.error('[TouchpadSpeed] WSF preload is not active');
+                logError('WSF preload is not active');
                 this._showNotification(
                     'WSF Preload Not Active',
                     'Touchpad Speed Control requires WSF preload to be enabled. Run "wsf enable" and log out/in.'
                 );
                 return;
             }
-            console.log('[TouchpadSpeed] WSF preload is active');
+            log('WSF preload is active');
 
             // Step 3: Load GSettings schema
             this._settings = this.getSettings();
-            console.log('[TouchpadSpeed] Settings loaded');
+            log('Settings loaded');
 
             // Step 4: Get window tracker for app identification
             this._windowTracker = Shell.WindowTracker.get_default();
@@ -104,7 +125,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._focusHandler = global.display.connect(
                 'notify::focus-window',
                 () => {
-                    console.log('[TouchpadSpeed] Focus changed!');
+                    log('Focus changed!');
                     this._lastAppliedAppId = null;
                     this._handleChange();
                 }
@@ -112,9 +133,9 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
             // Step 8: Apply initial factor for the current window
             this._handleChange();
-            console.log('[TouchpadSpeed] ===== ENABLE COMPLETE =====');
+            log('===== ENABLE COMPLETE =====');
         } catch (e) {
-            console.error('[TouchpadSpeed] ERROR: ' + e.message);
+            logError('ERROR: ' + e.message);
         }
     }
 
@@ -123,7 +144,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
      * Cleans up all resources: stops polling, disconnects signal, nullifies references.
      */
     disable() {
-        console.log('[TouchpadSpeed] ===== DISABLE CALLED =====');
+        log('===== DISABLE CALLED =====');
 
         this._stopCursorTracking();
 
@@ -140,7 +161,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         if (this._settings) {
             this._settings = null;
         }
-        console.log('[TouchpadSpeed] ===== DISABLE COMPLETE =====');
+        log('===== DISABLE COMPLETE =====');
     }
 
     /**
@@ -180,7 +201,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
             return enabled && libraryMapped;
         } catch (e) {
-            console.error('[TouchpadSpeed] Failed to check WSF status: ' + e.message);
+            logError('Failed to check WSF status: ' + e.message);
             return false;
         }
     }
@@ -195,7 +216,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         try {
             Main.notify(title, message);
         } catch (e) {
-            console.error('[TouchpadSpeed] Failed to show notification: ' + e.message);
+            logError('Failed to show notification: ' + e.message);
         }
     }
 
@@ -218,7 +239,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
                 return GLib.SOURCE_CONTINUE;
             }
         );
-        console.log('[TouchpadSpeed] Cursor tracking started (300ms interval)');
+        log('Cursor tracking started (300ms interval)');
     }
 
     /**
@@ -229,7 +250,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         if (this._cursorPoller) {
             GLib.source_remove(this._cursorPoller);
             this._cursorPoller = null;
-            console.log('[TouchpadSpeed] Cursor tracking stopped');
+            log('Cursor tracking stopped');
         }
     }
 
@@ -335,7 +356,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
                 const normalizedKey = key.endsWith('.desktop') ? key.slice(0, -8) : key;
                 if (normalizedAppId.includes(normalizedKey) || normalizedKey.includes(normalizedAppId)) {
                     factor = value;
-                    console.log('[TouchpadSpeed] ' + axisLabel + ' partial match: ' + key);
+                    log(axisLabel + ' partial match: ' + key);
                     break;
                 }
             }
@@ -344,7 +365,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         // Step 4: Use global factor if no per-app match found
         if (factor === undefined) {
             factor = globalFactor;
-            console.log('[TouchpadSpeed] ' + axisLabel + ' using global factor');
+            log(axisLabel + ' using global factor');
         }
 
         return factor;
@@ -377,33 +398,33 @@ export default class TouchpadSpeedControlExtension extends Extension {
             const source = this._windowUnderCursor ? 'cursor' : 'focus';
 
             if (!targetWindow) {
-                console.log('[TouchpadSpeed] No target window');
+                log('No target window');
                 return;
             }
 
             const app = this._windowTracker.get_window_app(targetWindow);
             if (!app) {
-                console.log('[TouchpadSpeed] No app for window');
+                log('No app for window');
                 return;
             }
 
             const appId = app.get_id();
             const windowTitle = targetWindow.get_title ? targetWindow.get_title() : 'unknown';
-            console.log('[TouchpadSpeed] Source: ' + source + ' | App: ' + appId + ' | Title: ' + windowTitle);
+            log('Source: ' + source + ' | App: ' + appId + ' | Title: ' + windowTitle);
 
             // Skip if the same app was already processed
             // This prevents redundant factor resolution and wsf calls
             if (appId === this._lastAppliedAppId) {
-                console.log('[TouchpadSpeed] Same app, skipping');
+                log('Same app, skipping');
                 return;
             }
 
             // Resolve factors for both axes independently
             const vFactor = this._resolveFactor('v', appId);
-            console.log('[TouchpadSpeed] Vertical factor: ' + vFactor);
+            log('Vertical factor: ' + vFactor);
 
             const hFactor = this._resolveFactor('h', appId);
-            console.log('[TouchpadSpeed] Horizontal factor: ' + hFactor);
+            log('Horizontal factor: ' + hFactor);
 
             // Mark this app as processed
             this._lastAppliedAppId = appId;
@@ -416,13 +437,13 @@ export default class TouchpadSpeedControlExtension extends Extension {
                         [WSF_PATH, 'set', '--scroll-vertical', vFactor.toString()],
                         Gio.SubprocessFlags.NONE
                     );
-                    console.log('[TouchpadSpeed] Vertical WSF command executed');
+                    log('Vertical WSF command executed');
                 } catch (e) {
-                    console.error('[TouchpadSpeed] Failed to execute vertical WSF: ' + e.message);
+                    logError('Failed to execute vertical WSF: ' + e.message);
                 }
                 this._lastAppliedVFactor = vFactor;
             } else {
-                console.log('[TouchpadSpeed] Vertical factor unchanged, skipping');
+                log('Vertical factor unchanged, skipping');
             }
 
             // Apply horizontal factor only if it differs from the cached value
@@ -432,16 +453,16 @@ export default class TouchpadSpeedControlExtension extends Extension {
                         [WSF_PATH, 'set', '--scroll-horizontal', hFactor.toString()],
                         Gio.SubprocessFlags.NONE
                     );
-                    console.log('[TouchpadSpeed] Horizontal WSF command executed');
+                    log('Horizontal WSF command executed');
                 } catch (e) {
-                    console.error('[TouchpadSpeed] Failed to execute horizontal WSF: ' + e.message);
+                    logError('Failed to execute horizontal WSF: ' + e.message);
                 }
                 this._lastAppliedHFactor = hFactor;
             } else {
-                console.log('[TouchpadSpeed] Horizontal factor unchanged, skipping');
+                log('Horizontal factor unchanged, skipping');
             }
         } catch (e) {
-            console.error('[TouchpadSpeed] Error: ' + e.message);
+            logError('Error: ' + e.message);
         }
     }
 }
