@@ -1,0 +1,6 @@
+# Development artifacts
+backups/
+backup/
+*.log
+.DS_Store
+Thumbs.db
