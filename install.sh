@@ -13,8 +13,7 @@ else
 fi
 
 glib-compile-schemas "$EXT_DIR/schemas/"
-gnome-extensions enable touchpad-speed-control@ritesh
 
 echo ""
 echo "Installed successfully."
-echo "Log out and back in for changes to take effect."
+echo "Log out and back in, then enable the extension from GNOME Extensions."
