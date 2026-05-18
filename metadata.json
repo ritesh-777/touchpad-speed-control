@@ -3,7 +3,7 @@
   "name": "Touchpad Speed Control",
   "description": "Per-application touchpad scroll speed control for GNOME on Wayland.",
   "version": 5,
-  "shell-version": ["50"],
+  "shell-version": ["47", "48", "49", "50"],
   "url": "https://github.com/ritesh-777/touchpad-speed-control",
   "settings-schema": "org.gnome.shell.extensions.touchpad-speed-control"
 }
