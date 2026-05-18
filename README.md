@@ -1,6 +1,6 @@
 # Touchpad Speed Control
 
-[![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-50-blue.svg)](https://gnome.org)
+[![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-47%E2%80%9350-blue.svg)](https://gnome.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Per-application touchpad scroll speed control for GNOME on Wayland.
