@@ -33,27 +33,15 @@ Then **log out and log back in** for the changes to take effect.
 
 Install from [extensions.gnome.org](https://extensions.gnome.org/) (coming soon).
 
-### Method 2: Manual Installation
-
-1. Clone or download this repository
-2. Copy the extension folder to your local extensions directory:
+### Method 2: One-Line Install (Recommended for Manual Installation)
 
 ```bash
-cp -r touchpad-speed-control@ritesh ~/.local/share/gnome-shell/extensions/
+curl -fsSL https://raw.githubusercontent.com/ritesh-777/touchpad-speed-control/main/install.sh | bash
 ```
 
-3. Compile the GSettings schema:
+Then log out and back in for changes to take effect.
 
-```bash
-glib-compile-schemas ~/.local/share/gnome-shell/extensions/touchpad-speed-control@ritesh/schemas/
-```
-
-4. Restart GNOME Shell (log out and back in on Wayland, or `Alt+F2` → `r` → Enter on X11)
-5. Enable the extension:
-
-```bash
-gnome-extensions enable touchpad-speed-control@ritesh
-```
+To update to the latest version, run the same command again — it will automatically pull the latest changes.
 
 ## Usage
 
