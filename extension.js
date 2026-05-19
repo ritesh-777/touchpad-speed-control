@@ -19,8 +19,32 @@ import Clutter from 'gi://Clutter';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-// Path to the WSF CLI binary (installed by the user at ~/.local/bin/wsf)
-const WSF_PATH = GLib.getenv('HOME') + '/.local/bin/wsf';
+/**
+ * Locates the WSF CLI binary by searching PATH and common install locations.
+ *
+ * Search order:
+ *   1. $PATH (covers AUR at /usr/bin, system packages, custom paths)
+ *   2. ~/.local/bin/wsf (manual builds with --prefix=$HOME/.local)
+ *   3. /usr/local/bin/wsf (system-wide manual builds with default prefix)
+ *   4. /usr/bin/wsf (AUR/distro packages explicitly)
+ *
+ * @returns {string|null} The full path to the wsf binary, or null if not found.
+ */
+function _findWSFPath() {
+    const pathFound = GLib.find_program_in_path('wsf');
+    if (pathFound) return pathFound;
+
+    const home = GLib.getenv('HOME');
+    const candidates = [
+        home + '/.local/bin/wsf',
+        '/usr/local/bin/wsf',
+        '/usr/bin/wsf',
+    ];
+    for (const p of candidates) {
+        if (Gio.File.new_for_path(p).query_exists(null)) return p;
+    }
+    return null;
+}
 
 // Set to true for verbose logging (useful for debugging, disable for production)
 const DEBUG = false;
@@ -64,21 +88,21 @@ export default class TouchpadSpeedControlExtension extends Extension {
      *   5. Connect to window focus change signal
      *   6. Trigger initial factor application
      */
-    enable() {
+     enable() {
         log('===== ENABLE CALLED =====');
 
         try {
             // Step 1: Verify WSF binary exists
-            const wsfFile = Gio.File.new_for_path(WSF_PATH);
-            if (!wsfFile.query_exists(null)) {
-                logError('WSF NOT FOUND: ' + WSF_PATH);
+            this._wsfPath = _findWSFPath();
+            if (!this._wsfPath) {
+                logError('WSF binary not found in PATH or common locations');
                 this._showNotification(
                     'WSF Not Installed',
-                    'Touchpad Speed Control requires Wayland Scroll Factor (WSF). Please install it first.'
+                    'Touchpad Speed Control requires Wayland Scroll Factor (WSF). Please install it first: https://github.com/daniel-g-carrasco/wayland-scroll-factor'
                 );
                 return;
             }
-            log('WSF found');
+            log('WSF found at: ' + this._wsfPath);
 
             // Step 2: Verify WSF preload is active
             // This checks both "enabled: yes" and "gnome-shell library mapped: yes"
@@ -175,10 +199,10 @@ export default class TouchpadSpeedControlExtension extends Extension {
      *
      * @returns {boolean} True if WSF is fully active, false otherwise.
      */
-    _checkWSFStatus() {
+     _checkWSFStatus() {
         try {
             const subprocess = Gio.Subprocess.new(
-                [WSF_PATH, 'status'],
+                [this._wsfPath, 'status'],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE
             );
             const [, stdout] = subprocess.communicate_utf8(null, null);
@@ -434,7 +458,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             if (vFactor !== this._lastAppliedVFactor) {
                 try {
                     Gio.Subprocess.new(
-                        [WSF_PATH, 'set', '--scroll-vertical', vFactor.toString()],
+                        [this._wsfPath, 'set', '--scroll-vertical', vFactor.toString()],
                         Gio.SubprocessFlags.NONE
                     );
                     log('Vertical WSF command executed');
@@ -450,7 +474,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             if (hFactor !== this._lastAppliedHFactor) {
                 try {
                     Gio.Subprocess.new(
-                        [WSF_PATH, 'set', '--scroll-horizontal', hFactor.toString()],
+                        [this._wsfPath, 'set', '--scroll-horizontal', hFactor.toString()],
                         Gio.SubprocessFlags.NONE
                     );
                     log('Horizontal WSF command executed');

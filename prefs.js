@@ -19,8 +19,32 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-// Path to the WSF CLI binary (same as extension.js)
-const WSF_PATH = GLib.getenv('HOME') + '/.local/bin/wsf';
+/**
+ * Locates the WSF CLI binary by searching PATH and common install locations.
+ *
+ * Search order:
+ *   1. $PATH (covers AUR at /usr/bin, system packages, custom paths)
+ *   2. ~/.local/bin/wsf (manual builds with --prefix=$HOME/.local)
+ *   3. /usr/local/bin/wsf (system-wide manual builds with default prefix)
+ *   4. /usr/bin/wsf (AUR/distro packages explicitly)
+ *
+ * @returns {string|null} The full path to the wsf binary, or null if not found.
+ */
+function _findWSFPath() {
+    const pathFound = GLib.find_program_in_path('wsf');
+    if (pathFound) return pathFound;
+
+    const home = GLib.getenv('HOME');
+    const candidates = [
+        home + '/.local/bin/wsf',
+        '/usr/local/bin/wsf',
+        '/usr/bin/wsf',
+    ];
+    for (const p of candidates) {
+        if (Gio.File.new_for_path(p).query_exists(null)) return p;
+    }
+    return null;
+}
 
 /**
  * TouchpadSpeedControlPreferences
@@ -68,15 +92,15 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
      *
      * @returns {Object} { installed: boolean, active: boolean }
      */
-    _checkWSFStatus() {
-        const wsfFile = Gio.File.new_for_path(WSF_PATH);
-        if (!wsfFile.query_exists(null)) {
+     _checkWSFStatus() {
+        const wsfPath = _findWSFPath();
+        if (!wsfPath) {
             return { installed: false, active: false };
         }
 
         try {
             const subprocess = Gio.Subprocess.new(
-                [WSF_PATH, 'status'],
+                [wsfPath, 'status'],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE
             );
             const [, stdout] = subprocess.communicate_utf8(null, null);
