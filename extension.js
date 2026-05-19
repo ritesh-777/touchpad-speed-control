@@ -81,7 +81,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
      * Called when the extension is enabled.
      *
      * Flow:
-     *   1. Check if WSF binary exists at ~/.local/bin/wsf
+     *   1. Check if WSF binary exists (searches $PATH and common locations)
      *   2. Check if WSF preload is active (enabled + library mapped into gnome-shell)
      *   3. If either check fails, show a notification and abort
      *   4. Load GSettings, initialize state, start cursor tracking
