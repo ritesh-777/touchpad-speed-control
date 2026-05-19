@@ -96,7 +96,7 @@ Scroll factors are cached and only updated when the application changes, minimiz
 
 ### "WSF Not Installed"
 
-The extension cannot find the `wsf` binary at `~/.local/bin/wsf`. Install WSF first:
+The extension cannot find the `wsf` binary. It searches `$PATH`, `~/.local/bin/wsf`, `/usr/local/bin/wsf`, and `/usr/bin/wsf`. Install WSF first:
 
 ```bash
 # Check if WSF is installed
