@@ -1355,7 +1355,14 @@ class Settings {
                             this.schema.set_double('global-factor', data.vertical.global_factor);
                         }
                         if (data.vertical.app_factors && typeof data.vertical.app_factors === 'object') {
-                            const vVariant = new GLib.Variant('a{sd}', data.vertical.app_factors);
+                            const installedAppIds = new Set(this.apps.map(a => a.id));
+                            const filtered = {};
+                            for (const [appId, factor] of Object.entries(data.vertical.app_factors)) {
+                                if (installedAppIds.has(appId)) {
+                                    filtered[appId] = factor;
+                                }
+                            }
+                            const vVariant = new GLib.Variant('a{sd}', filtered);
                             this.schema.set_value('app-factors', vVariant);
                         }
 
@@ -1363,7 +1370,14 @@ class Settings {
                             this.schema.set_double('h-global-factor', data.horizontal.global_factor);
                         }
                         if (data.horizontal.app_factors && typeof data.horizontal.app_factors === 'object') {
-                            const hVariant = new GLib.Variant('a{sd}', data.horizontal.app_factors);
+                            const installedAppIds = new Set(this.apps.map(a => a.id));
+                            const filtered = {};
+                            for (const [appId, factor] of Object.entries(data.horizontal.app_factors)) {
+                                if (installedAppIds.has(appId)) {
+                                    filtered[appId] = factor;
+                                }
+                            }
+                            const hVariant = new GLib.Variant('a{sd}', filtered);
                             this.schema.set_value('h-app-factors', hVariant);
                         }
 
