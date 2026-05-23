@@ -1269,6 +1269,7 @@ class Settings {
     _exportSettings() {
         const dialog = new Gtk.FileDialog();
         dialog.set_title(_('Export Settings'));
+        dialog.set_initial_name('touchpad-speed-control-settings.json');
 
         const filter = new Gtk.FileFilter();
         filter.set_name(_('JSON Files'));
