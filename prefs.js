@@ -327,6 +327,36 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         page.add(containerGroup);
         window.add(page);
 
+        // Import/Export group at the bottom of the page
+        const ioGroup = new Adw.PreferencesGroup({
+            title: _('Backup & Restore'),
+            description: _('Export or import all scroll factor settings as a JSON file.')
+        });
+        const ioBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 10,
+            halign: Gtk.Align.CENTER,
+            margin_top: 10,
+            margin_bottom: 10
+        });
+
+        const exportBtn = new Gtk.Button({
+            label: _('Export Settings'),
+            css_classes: ['flat']
+        });
+        exportBtn.connect('clicked', () => settingsUI._exportSettings());
+        ioBox.append(exportBtn);
+
+        const importBtn = new Gtk.Button({
+            label: _('Import Settings'),
+            css_classes: ['flat']
+        });
+        importBtn.connect('clicked', () => settingsUI._importSettings());
+        ioBox.append(importBtn);
+
+        ioGroup.add(ioBox);
+        page.add(ioGroup);
+
         // Scan and populate the app list (shared between both tabs)
         settingsUI.loadApps();
     }
@@ -1230,6 +1260,151 @@ class Settings {
         row.set_child(box);
 
         return row;
+    }
+
+    /**
+     * Opens a save dialog and exports all settings to a JSON file.
+     * Uses Gtk.FileDialog (GTK 4.10+, available on GNOME 45+).
+     */
+    _exportSettings() {
+        const dialog = new Gtk.FileDialog();
+        dialog.set_title(_('Export Settings'));
+
+        const filter = new Gtk.FileFilter();
+        filter.set_name(_('JSON Files'));
+        filter.add_pattern('*.json');
+        dialog.set_default_filter(filter);
+
+        const data = {
+            version: 1,
+            vertical: {
+                global_factor: this.schema.get_double('global-factor'),
+                app_factors: this.schema.get_value('app-factors').deep_unpack()
+            },
+            horizontal: {
+                global_factor: this.schema.get_double('h-global-factor'),
+                app_factors: this.schema.get_value('h-app-factors').deep_unpack()
+            }
+        };
+
+        const json = JSON.stringify(data, null, 2);
+        const encoder = new TextEncoder();
+        const uint8array = encoder.encode(json);
+        const bytes = new GLib.Bytes(uint8array);
+
+        dialog.save(this._window, null, (self, result) => {
+            try {
+                const file = self.save_finish(result);
+                file.replace_contents_bytes_async(bytes, null, false, Gio.FileCreateFlags.NONE, null, (file, result) => {
+                    try {
+                        file.replace_contents_finish(result);
+                        this._showToast(_('Settings exported'));
+                    } catch (e) {
+                        this._showToast(_('Failed to export settings'));
+                    }
+                });
+            } catch (e) {
+                // User cancelled — ignore
+            }
+        });
+    }
+
+    /**
+     * Opens a file dialog and imports settings from a JSON file.
+     * Overwrites all current settings. Validates file format before applying.
+     */
+    _importSettings() {
+        const dialog = new Gtk.FileDialog();
+        dialog.set_title(_('Import Settings'));
+
+        const filter = new Gtk.FileFilter();
+        filter.set_name(_('JSON Files'));
+        filter.add_pattern('*.json');
+        dialog.set_default_filter(filter);
+
+        dialog.open(this._window, null, (self, result) => {
+            try {
+                const file = self.open_finish(result);
+                file.load_contents_async(null, (file, result) => {
+                    try {
+                        const [success, contents] = file.load_contents_finish(result);
+                        if (!success || !contents) {
+                            this._showToast(_('Could not read file'));
+                            return;
+                        }
+
+                        const decoder = new TextDecoder();
+                        const text = decoder.decode(contents);
+                        let data;
+                        try {
+                            data = JSON.parse(text);
+                        } catch (e) {
+                            this._showToast(_('Invalid JSON file'));
+                            return;
+                        }
+
+                        if (!data || data.version !== 1 || !data.vertical || !data.horizontal) {
+                            this._showToast(_('Invalid file format'));
+                            return;
+                        }
+
+                        this._suppressSave = true;
+
+                        if (typeof data.vertical.global_factor === 'number') {
+                            this.schema.set_double('global-factor', data.vertical.global_factor);
+                        }
+                        if (data.vertical.app_factors && typeof data.vertical.app_factors === 'object') {
+                            const vVariant = new GLib.Variant('a{sd}', data.vertical.app_factors);
+                            this.schema.set_value('app-factors', vVariant);
+                        }
+
+                        if (typeof data.horizontal.global_factor === 'number') {
+                            this.schema.set_double('h-global-factor', data.horizontal.global_factor);
+                        }
+                        if (data.horizontal.app_factors && typeof data.horizontal.app_factors === 'object') {
+                            const hVariant = new GLib.Variant('a{sd}', data.horizontal.app_factors);
+                            this.schema.set_value('h-app-factors', hVariant);
+                        }
+
+                        this._suppressSave = false;
+
+                        this.refreshAppList();
+
+                        if (this.vFactorLabel) {
+                            this.vFactorLabel.set_label(data.vertical.global_factor.toFixed(2));
+                        }
+                        if (this.vFactorAdjustment) {
+                            this.vFactorAdjustment.set_value(data.vertical.global_factor);
+                        }
+                        if (this.hFactorLabel) {
+                            this.hFactorLabel.set_label(data.horizontal.global_factor.toFixed(2));
+                        }
+                        if (this.hFactorAdjustment) {
+                            this.hFactorAdjustment.set_value(data.horizontal.global_factor);
+                        }
+
+                        this._showToast(_('Settings imported'));
+                    } catch (e) {
+                        this._showToast(_('Failed to read file'));
+                    }
+                });
+            } catch (e) {
+                // User cancelled — ignore
+            }
+        });
+    }
+
+    /**
+     * Shows a brief notification toast in the preferences window.
+     *
+     * @param {string} message - The message to display.
+     */
+    _showToast(message) {
+        const toast = new Adw.Toast({
+            title: message,
+            timeout: 3
+        });
+        this._window.add_toast(toast);
     }
 
     /**

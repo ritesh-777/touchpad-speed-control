@@ -70,6 +70,8 @@ Each tab contains:
 | **Search** | Filter applications by name or ID |
 | **Reset to Defaults** | Reset all factors to 1.0 for the current axis |
 | **Sync to Horizontal / Vertical** | Copy all settings from one axis to the other |
+| **Export Settings** | Save all factors to a JSON file |
+| **Import Settings** | Load all factors from a JSON file |
 
 ### How It Works
 
