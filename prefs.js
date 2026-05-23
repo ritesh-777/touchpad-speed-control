@@ -282,52 +282,129 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
             icon_name: 'input-mouse-symbolic'
         });
 
-        // Vertical tab content
-        const vGroup = new Adw.PreferencesGroup({
-            title: _('Vertical Scroll'),
-            description: _('Per-application vertical scroll factor control.')
-        });
-        vGroup.add(settingsUI.createFactorRow('v'));
-        vGroup.add(settingsUI.vActionBox);
-        vGroup.add(settingsUI.vSearchEntry);
-        vGroup.add(settingsUI.vAppList);
-
-        // Horizontal tab content
-        const hGroup = new Adw.PreferencesGroup({
-            title: _('Horizontal Scroll'),
-            description: _('Per-application horizontal scroll factor control.')
-        });
-        hGroup.add(settingsUI.createFactorRow('h'));
-        hGroup.add(settingsUI.hActionBox);
-        hGroup.add(settingsUI.hSearchEntry);
-        hGroup.add(settingsUI.hAppList);
-
-        // Gtk.Stack for tab switching
-        const stack = new Gtk.Stack({
-            transition_type: Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
-            hhomogeneous: false
+        // General tab content
+        const generalGroup = new Adw.PreferencesGroup({
+            title: _('General'),
+            description: _('Configure detection behavior and performance.')
         });
 
-        stack.add_titled(vGroup, 'vertical', _('Vertical'));
-        stack.add_titled(hGroup, 'horizontal', _('Horizontal'));
+        const cursorRow = new Adw.PreferencesRow({ activatable: false });
+        const cursorBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const cursorLabel = new Gtk.Label({
+            label: _('Enable cursor tracking'),
+            hexpand: true,
+            xalign: 0
+        });
+        const cursorSwitch = new Gtk.Switch({
+            active: window._settings.get_boolean('cursor-tracking-enabled'),
+            valign: Gtk.Align.CENTER
+        });
+        cursorSwitch.connect('notify::active', () => {
+            window._settings.set_boolean('cursor-tracking-enabled', cursorSwitch.get_active());
+        });
+        cursorBox.append(cursorLabel);
+        cursorBox.append(cursorSwitch);
+        cursorRow.set_child(cursorBox);
+        generalGroup.add(cursorRow);
 
-        // Tab switcher widget
-        const stackSwitcher = new Gtk.StackSwitcher({
-            stack: stack,
-            halign: Gtk.Align.CENTER,
-            margin_top: 10,
-            margin_bottom: 10
+        const intervalRow = new Adw.PreferencesRow({ activatable: false });
+        const intervalBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const intervalLabel = new Gtk.Label({
+            label: _('Poll interval (ms)'),
+            hexpand: true,
+            xalign: 0
+        });
+        const intervalSpin = new Gtk.SpinButton({
+            adjustment: new Gtk.Adjustment({
+                lower: 50,
+                upper: 2000,
+                step_increment: 10,
+                page_increment: 100,
+                value: window._settings.get_int('cursor-poll-interval')
+            }),
+            valign: Gtk.Align.CENTER
+        });
+        intervalSpin.connect('value-changed', () => {
+            window._settings.set_int('cursor-poll-interval', intervalSpin.get_value_as_int());
+        });
+        intervalBox.append(intervalLabel);
+        intervalBox.append(intervalSpin);
+        intervalRow.set_child(intervalBox);
+        generalGroup.add(intervalRow);
+
+        const focusRow = new Adw.PreferencesRow({ activatable: false });
+        const focusBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const focusLabel = new Gtk.Label({
+            label: _('Enable focus detection'),
+            hexpand: true,
+            xalign: 0
+        });
+        const focusSwitch = new Gtk.Switch({
+            active: window._settings.get_boolean('focus-detection-enabled'),
+            valign: Gtk.Align.CENTER
+        });
+        focusSwitch.connect('notify::active', () => {
+            window._settings.set_boolean('focus-detection-enabled', focusSwitch.get_active());
+        });
+        focusBox.append(focusLabel);
+        focusBox.append(focusSwitch);
+        focusRow.set_child(focusBox);
+        generalGroup.add(focusRow);
+
+        // Debugging information group
+        const debugGroup = new Adw.PreferencesGroup({
+            title: _('Debugging Information'),
+            description: _('Show diagnostic information in the top panel.')
         });
 
-        // Container group holds both the switcher and the stack
-        const containerGroup = new Adw.PreferencesGroup();
-        containerGroup.add(stackSwitcher);
-        containerGroup.add(stack);
+        const panelRow = new Adw.PreferencesRow({ activatable: false });
+        const panelBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const panelLabel = new Gtk.Label({
+            label: _('Panel indicator'),
+            hexpand: true,
+            xalign: 0
+        });
+        const panelSwitch = new Gtk.Switch({
+            active: window._settings.get_boolean('show-panel-indicator'),
+            valign: Gtk.Align.CENTER
+        });
+        panelSwitch.connect('notify::active', () => {
+            window._settings.set_boolean('show-panel-indicator', panelSwitch.get_active());
+        });
+        panelBox.append(panelLabel);
+        panelBox.append(panelSwitch);
+        panelRow.set_child(panelBox);
+        debugGroup.add(panelRow);
 
-        page.add(containerGroup);
-        window.add(page);
-
-        // Import/Export group at the bottom of the page
+        // Import/Export group
         const ioGroup = new Adw.PreferencesGroup({
             title: _('Backup & Restore'),
             description: _('Export or import all scroll factor settings as a JSON file.')
@@ -355,7 +432,60 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         ioBox.append(importBtn);
 
         ioGroup.add(ioBox);
-        page.add(ioGroup);
+
+        // General tab uses an Adw.PreferencesPage to properly render group headings
+        const generalPage = new Adw.PreferencesPage();
+        generalPage.add(generalGroup);
+        debugGroup.margin_top = 12;
+        generalPage.add(debugGroup);
+        ioGroup.margin_top = 12;
+        generalPage.add(ioGroup);
+
+        // Vertical tab content
+        const vGroup = new Adw.PreferencesGroup({
+            title: _('Vertical Scroll'),
+            description: _('Per-application vertical scroll factor control.')
+        });
+        vGroup.add(settingsUI.createFactorRow('v'));
+        vGroup.add(settingsUI.vActionBox);
+        vGroup.add(settingsUI.vSearchEntry);
+        vGroup.add(settingsUI.vAppList);
+
+        // Horizontal tab content
+        const hGroup = new Adw.PreferencesGroup({
+            title: _('Horizontal Scroll'),
+            description: _('Per-application horizontal scroll factor control.')
+        });
+        hGroup.add(settingsUI.createFactorRow('h'));
+        hGroup.add(settingsUI.hActionBox);
+        hGroup.add(settingsUI.hSearchEntry);
+        hGroup.add(settingsUI.hAppList);
+
+        // Gtk.Stack for tab switching
+        const stack = new Gtk.Stack({
+            transition_type: Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+            hhomogeneous: false
+        });
+
+        stack.add_titled(generalPage, 'general', _('General'));
+        stack.add_titled(vGroup, 'vertical', _('Vertical'));
+        stack.add_titled(hGroup, 'horizontal', _('Horizontal'));
+
+        // Tab switcher widget
+        const stackSwitcher = new Gtk.StackSwitcher({
+            stack: stack,
+            halign: Gtk.Align.CENTER,
+            margin_top: 10,
+            margin_bottom: 10
+        });
+
+        // Container group holds both the switcher and the stack
+        const containerGroup = new Adw.PreferencesGroup();
+        containerGroup.add(stackSwitcher);
+        containerGroup.add(stack);
+
+        page.add(containerGroup);
+        window.add(page);
 
         // Scan and populate the app list (shared between both tabs)
         settingsUI.loadApps();
@@ -583,14 +713,21 @@ class Settings {
         scale.add_mark(1.00, Gtk.PositionType.BOTTOM, null);
 
         // Debounced save: updates global factor and all per-app factors
+        let saveTimeout = null;
         adjustment.connect('value-changed', () => {
-            if (this._suppressSave) return;
+            if (this._suppressSave) {
+                if (saveTimeout) {
+                    GLib.source_remove(saveTimeout);
+                    saveTimeout = null;
+                }
+                return;
+            }
             const newValue = adjustment.get_value();
             valueLabel.set_label(newValue.toFixed(2));
-            if (this._saveTimeout) GLib.source_remove(this._saveTimeout);
-            this._saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            if (saveTimeout) GLib.source_remove(saveTimeout);
+            saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
                 this.updateAllFactors(axis, newValue);
-                this._saveTimeout = null;
+                saveTimeout = null;
                 return GLib.SOURCE_REMOVE;
             });
         });
@@ -872,14 +1009,21 @@ class Settings {
         scale.add_mark(1.00, Gtk.PositionType.BOTTOM, null);
 
         // Debounced save for per-app factor
+        let saveTimeout = null;
         adjustment.connect('value-changed', () => {
-            if (this._suppressSave) return;
+            if (this._suppressSave) {
+                if (saveTimeout) {
+                    GLib.source_remove(saveTimeout);
+                    saveTimeout = null;
+                }
+                return;
+            }
             const newValue = adjustment.get_value();
             valueLabel.set_label(newValue.toFixed(2));
-            if (this._saveTimeout) GLib.source_remove(this._saveTimeout);
-            this._saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            if (saveTimeout) GLib.source_remove(saveTimeout);
+            saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
                 this.updateAppFactor(app.id, newValue, axis);
-                this._saveTimeout = null;
+                saveTimeout = null;
                 return GLib.SOURCE_REMOVE;
             });
         });
@@ -1214,14 +1358,21 @@ class Settings {
         scale.add_mark(0.50, Gtk.PositionType.BOTTOM, null);
         scale.add_mark(1.00, Gtk.PositionType.BOTTOM, null);
 
+        let saveTimeout = null;
         adjustment.connect('value-changed', () => {
-            if (this._suppressSave) return;
+            if (this._suppressSave) {
+                if (saveTimeout) {
+                    GLib.source_remove(saveTimeout);
+                    saveTimeout = null;
+                }
+                return;
+            }
             const newValue = adjustment.get_value();
             valueLabel.set_label(newValue.toFixed(2));
-            if (this._saveTimeout) GLib.source_remove(this._saveTimeout);
-            this._saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            if (saveTimeout) GLib.source_remove(saveTimeout);
+            saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
                 this.updateAppFactor(app.id, newValue, axis);
-                this._saveTimeout = null;
+                saveTimeout = null;
                 return GLib.SOURCE_REMOVE;
             });
         });
@@ -1381,8 +1532,6 @@ class Settings {
                             this.schema.set_value('h-app-factors', hVariant);
                         }
 
-                        this._suppressSave = false;
-
                         this.refreshAppList();
 
                         if (this.vFactorLabel) {
@@ -1397,6 +1546,8 @@ class Settings {
                         if (this.hFactorAdjustment) {
                             this.hFactorAdjustment.set_value(data.horizontal.global_factor);
                         }
+
+                        this._suppressSave = false;
 
                         this._showToast(_('Settings imported'));
                     } catch (e) {

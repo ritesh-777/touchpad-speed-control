@@ -16,6 +16,8 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Shell from 'gi://Shell';
 import Clutter from 'gi://Clutter';
+import St from 'gi://St';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
@@ -105,8 +107,6 @@ export default class TouchpadSpeedControlExtension extends Extension {
             log('WSF found at: ' + this._wsfPath);
 
             // Step 2: Verify WSF preload is active
-            // This checks both "enabled: yes" and "gnome-shell library mapped: yes"
-            // from `wsf status` output. Without preload, `wsf set` commands do nothing.
             const wsfActive = this._checkWSFStatus();
             if (!wsfActive) {
                 logError('WSF preload is not active');
@@ -126,12 +126,6 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._windowTracker = Shell.WindowTracker.get_default();
 
             // Step 5: Initialize cursor tracking state
-            // _windowUnderCursor: the Meta.Window currently under the mouse pointer
-            // _lastPointerX/Y: cached pointer position for deduplication (battery optimization)
-            // _cursorPoller: GLib timeout source ID for the 300ms polling interval
-            // _lastAppliedAppId: tracks which app's factor was last applied (prevents redundant calls)
-            // _lastAppliedVFactor: cached vertical scroll factor (prevents redundant wsf calls)
-            // _lastAppliedHFactor: cached horizontal scroll factor (prevents redundant wsf calls)
             this._windowUnderCursor = null;
             this._lastPointerX = 0;
             this._lastPointerY = 0;
@@ -139,23 +133,71 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._lastAppliedAppId = null;
             this._lastAppliedVFactor = null;
             this._lastAppliedHFactor = null;
+            this._settingsChangedHandlers = [];
 
-            // Step 6: Start cursor tracking (300ms polling interval)
-            this._startCursorTracking();
+            // Step 6: Read configurable settings
+            this._cursorTrackingEnabled = this._settings.get_boolean('cursor-tracking-enabled');
+            this._cursorPollInterval = this._settings.get_int('cursor-poll-interval');
+            this._focusDetectionEnabled = this._settings.get_boolean('focus-detection-enabled');
+            this._showPanelIndicatorEnabled = this._settings.get_boolean('show-panel-indicator');
 
-            // Step 7: Connect to window focus change signal
-            // Fires when the user switches windows via Alt+Tab, clicking, etc.
-            // Resets _lastAppliedAppId to ensure factor is re-evaluated on focus change.
-            this._focusHandler = global.display.connect(
-                'notify::focus-window',
-                () => {
-                    log('Focus changed!');
-                    this._lastAppliedAppId = null;
-                    this._handleChange();
-                }
+            // Step 7: Start cursor tracking if enabled
+            if (this._cursorTrackingEnabled) {
+                this._startCursorTracking();
+            }
+
+            // Step 8: Connect focus handler if enabled
+            if (this._focusDetectionEnabled) {
+                this._connectFocusHandler();
+            }
+
+            // Step 9: Show panel indicator if enabled
+            if (this._showPanelIndicatorEnabled) {
+                this._showPanelIndicator();
+            }
+
+            // Step 10: Connect GSettings change handlers for runtime updates
+            this._settingsChangedHandlers.push(
+                this._settings.connect('changed::cursor-tracking-enabled', () => {
+                    this._cursorTrackingEnabled = this._settings.get_boolean('cursor-tracking-enabled');
+                    if (this._cursorTrackingEnabled) {
+                        this._startCursorTracking();
+                    } else {
+                        this._stopCursorTracking();
+                    }
+                })
+            );
+            this._settingsChangedHandlers.push(
+                this._settings.connect('changed::cursor-poll-interval', () => {
+                    this._cursorPollInterval = this._settings.get_int('cursor-poll-interval');
+                    if (this._cursorTrackingEnabled) {
+                        this._stopCursorTracking();
+                        this._startCursorTracking();
+                    }
+                })
+            );
+            this._settingsChangedHandlers.push(
+                this._settings.connect('changed::focus-detection-enabled', () => {
+                    this._focusDetectionEnabled = this._settings.get_boolean('focus-detection-enabled');
+                    if (this._focusDetectionEnabled) {
+                        this._connectFocusHandler();
+                    } else {
+                        this._disconnectFocusHandler();
+                    }
+                })
+            );
+            this._settingsChangedHandlers.push(
+                this._settings.connect('changed::show-panel-indicator', () => {
+                    this._showPanelIndicatorEnabled = this._settings.get_boolean('show-panel-indicator');
+                    if (this._showPanelIndicatorEnabled) {
+                        this._showPanelIndicator();
+                    } else {
+                        this._hidePanelIndicator();
+                    }
+                })
             );
 
-            // Step 8: Apply initial factor for the current window
+            // Step 12: Apply initial factor for the current window
             this._handleChange();
             log('===== ENABLE COMPLETE =====');
         } catch (e) {
@@ -171,11 +213,15 @@ export default class TouchpadSpeedControlExtension extends Extension {
         log('===== DISABLE CALLED =====');
 
         this._stopCursorTracking();
+        this._disconnectFocusHandler();
+        this._hidePanelIndicator();
 
-        if (this._focusHandler) {
-            global.display.disconnect(this._focusHandler);
-            this._focusHandler = null;
+        if (this._settings && this._settingsChangedHandlers) {
+            for (const id of this._settingsChangedHandlers) {
+                this._settings.disconnect(id);
+            }
         }
+        this._settingsChangedHandlers = null;
 
         this._windowUnderCursor = null;
         this._lastAppliedAppId = null;
@@ -255,15 +301,16 @@ export default class TouchpadSpeedControlExtension extends Extension {
      * the pointer position hasn't changed since the last check.
      */
     _startCursorTracking() {
+        if (this._cursorPoller) return;
         this._cursorPoller = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
-            300,
+            this._cursorPollInterval,
             () => {
                 this._updateCursorWindow();
                 return GLib.SOURCE_CONTINUE;
             }
         );
-        log('Cursor tracking started (300ms interval)');
+        log('Cursor tracking started (' + this._cursorPollInterval + 'ms interval)');
     }
 
     /**
@@ -275,6 +322,65 @@ export default class TouchpadSpeedControlExtension extends Extension {
             GLib.source_remove(this._cursorPoller);
             this._cursorPoller = null;
             log('Cursor tracking stopped');
+        }
+    }
+
+    /**
+     * Connects the window focus change signal handler.
+     *
+     * Fires when the user switches windows via Alt+Tab, clicking, etc.
+     * Resets state to force re-evaluation of factors on focus change.
+     */
+    _connectFocusHandler() {
+        if (this._focusHandler) return;
+        this._focusHandler = global.display.connect(
+            'notify::focus-window',
+            () => {
+                log('Focus changed!');
+                this._windowUnderCursor = null;
+                this._lastAppliedAppId = null;
+                this._handleChange();
+            }
+        );
+        log('Focus detection enabled');
+    }
+
+    /**
+     * Disconnects the window focus change signal handler.
+     */
+    _disconnectFocusHandler() {
+        if (this._focusHandler) {
+            global.display.disconnect(this._focusHandler);
+            this._focusHandler = null;
+            log('Focus detection disabled');
+        }
+    }
+
+    /**
+     * Shows a panel indicator displaying the current vertical and horizontal factors.
+     */
+    _showPanelIndicator() {
+        if (this._panelButton) return;
+        this._panelButton = new PanelMenu.Button(0.0, 'TouchpadSpeedIndicator', false);
+        this._panelLabel = new St.Label({
+            text: 'V: 1.00  H: 1.00',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        this._panelButton.add_child(this._panelLabel);
+        Main.panel.addToStatusArea('touchpad-speed-indicator', this._panelButton, 1, 'right');
+    }
+
+    _hidePanelIndicator() {
+        if (this._panelButton) {
+            this._panelButton.destroy();
+            this._panelButton = null;
+            this._panelLabel = null;
+        }
+    }
+
+    _updatePanelLabel(vFactor, hFactor) {
+        if (this._panelLabel) {
+            this._panelLabel.set_text('V: ' + vFactor.toFixed(2) + '  H: ' + hFactor.toFixed(2));
         }
     }
 
@@ -335,6 +441,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._handleChange();
         } catch (e) {
             this._windowUnderCursor = null;
+            this._handleChange();
         }
     }
 
@@ -436,19 +543,21 @@ export default class TouchpadSpeedControlExtension extends Extension {
             const windowTitle = targetWindow.get_title ? targetWindow.get_title() : 'unknown';
             log('Source: ' + source + ' | App: ' + appId + ' | Title: ' + windowTitle);
 
-            // Skip if the same app was already processed
-            // This prevents redundant factor resolution and wsf calls
-            if (appId === this._lastAppliedAppId) {
-                log('Same app, skipping');
-                return;
-            }
-
             // Resolve factors for both axes independently
             const vFactor = this._resolveFactor('v', appId);
             log('Vertical factor: ' + vFactor);
 
             const hFactor = this._resolveFactor('h', appId);
             log('Horizontal factor: ' + hFactor);
+
+            // Update panel indicator with the current factors
+            this._updatePanelLabel(vFactor, hFactor);
+
+            // Skip redundant wsf calls if the same app was already processed
+            if (appId === this._lastAppliedAppId) {
+                log('Same app, skipping');
+                return;
+            }
 
             // Mark this app as processed
             this._lastAppliedAppId = appId;

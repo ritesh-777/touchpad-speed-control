@@ -68,5 +68,18 @@
     <key name="enabled" type="b">
       <default>true</default>
     </key>
+    <key name="cursor-tracking-enabled" type="b">
+      <default>true</default>
+    </key>
+    <key name="cursor-poll-interval" type="i">
+      <default>300</default>
+      <range min="50" max="2000"/>
+    </key>
+    <key name="focus-detection-enabled" type="b">
+      <default>true</default>
+    </key>
+    <key name="show-panel-indicator" type="b">
+      <default>false</default>
+    </key>
   </schema>
 </schemalist>
