@@ -285,7 +285,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         // General tab content
         const generalGroup = new Adw.PreferencesGroup({
             title: _('General'),
-            description: _('Configure detection behavior and performance.')
+            description: _('Configure detection behavior and performance. Export/import your settings at the bottom.')
         });
 
         const cursorRow = new Adw.PreferencesRow({ activatable: false });
@@ -404,17 +404,27 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         panelRow.set_child(panelBox);
         debugGroup.add(panelRow);
 
-        // Import/Export group
-        const ioGroup = new Adw.PreferencesGroup({
-            title: _('Backup & Restore'),
-            description: _('Export or import all scroll factor settings as a JSON file.')
-        });
+        // Import/Export: add buttons at the bottom of the General group
         const ioBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 10,
-            halign: Gtk.Align.CENTER,
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 6,
             margin_top: 10,
             margin_bottom: 10
+        });
+
+        const ioDesc = new Gtk.Label({
+            label: _('Backup or restore all scroll factor settings as a JSON file.'),
+            css_classes: ['dim-label'],
+            xalign: 0.5,
+            wrap: true,
+            max_width_chars: 40
+        });
+        ioBox.append(ioDesc);
+
+        const ioBtnBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 10,
+            halign: Gtk.Align.CENTER
         });
 
         const exportBtn = new Gtk.Button({
@@ -422,24 +432,26 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
             css_classes: ['flat']
         });
         exportBtn.connect('clicked', () => settingsUI._exportSettings());
-        ioBox.append(exportBtn);
+        ioBtnBox.append(exportBtn);
 
         const importBtn = new Gtk.Button({
             label: _('Import Settings'),
             css_classes: ['flat']
         });
         importBtn.connect('clicked', () => settingsUI._importSettings());
-        ioBox.append(importBtn);
+        ioBtnBox.append(importBtn);
 
-        ioGroup.add(ioBox);
+        ioBox.append(ioBtnBox);
+
+        const ioRow = new Adw.PreferencesRow({ activatable: false });
+        ioRow.set_child(ioBox);
+        generalGroup.add(ioRow);
 
         // General tab uses an Adw.PreferencesPage to properly render group headings
         const generalPage = new Adw.PreferencesPage();
         generalPage.add(generalGroup);
         debugGroup.margin_top = 12;
         generalPage.add(debugGroup);
-        ioGroup.margin_top = 12;
-        generalPage.add(ioGroup);
 
         // Vertical tab content
         const vGroup = new Adw.PreferencesGroup({
