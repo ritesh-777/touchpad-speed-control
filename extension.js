@@ -1,6 +1,6 @@
 // Touchpad Speed Control - Per-application scroll factor control for GNOME on Wayland
 // Author: Ritesh Seth
-// License: MIT
+// License: GPL v3
 // GitHub: https://github.com/ritesh-777/touchpad-speed-control
 //
 // This extension provides per-application touchpad scroll speed control on GNOME Wayland.

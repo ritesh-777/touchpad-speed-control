@@ -1,6 +1,6 @@
 // Touchpad Speed Control - Preferences UI
 // Author: Ritesh Seth
-// License: MIT
+// License: GPL v3
 // GitHub: https://github.com/ritesh-777/touchpad-speed-control
 //
 // This module provides the preferences UI for the Touchpad Speed Control extension.
