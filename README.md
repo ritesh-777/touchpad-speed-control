@@ -49,17 +49,27 @@ To update to the latest version, run the same command again — it will automati
 
 Open GNOME Extensions, find "Touchpad Speed Control", and click the settings gear icon.
 
-### Configuring Scroll Speed
+### Configuring Settings
 
-The settings interface has two tabs:
+The settings interface is organized into three tabs:
 
-- **Vertical Scroll** — Controls vertical (up/down) scroll speed
-- **Horizontal Scroll** — Controls horizontal (left/right) scroll speed
+#### 1. General
 
-Each tab contains:
+- **Enable cursor tracking** — Detects which window is under the pointer even if it is not focused (enables "scroll focus follows mouse").
+- **Poll interval (ms)** — Fine-tune how frequently the cursor position is polled (50ms – 2000ms). Lower values are more responsive; higher values save battery.
+- **Enable focus detection** — Detects application changes when you switch active windows (e.g. via Alt+Tab or clicking).
+- **Panel indicator** — Displays the currently applied vertical and horizontal factors in the GNOME Shell top panel status area for real-time diagnostics.
+- **Export/Import Settings** — Save or restore your custom scroll factors to/from a JSON backup file.
 
+#### 2. Vertical Scroll
+
+Controls vertical (up/down) scroll speed:
 - **Global Factor** — The default scroll speed applied to all applications. Adjust the slider to change the baseline speed for every app.
 - **Per-App Sliders** — Individual scroll speed controls for each installed application. Apps with custom values override the global factor.
+
+#### 3. Horizontal Scroll
+
+Controls horizontal (left/right) scroll speed with the same layout and options as the Vertical axis, operating independently.
 
 ### Controls
 
@@ -167,6 +177,12 @@ Then **log out and log back in**. The preload requires a fresh session to take e
 │ <factor>              <factor>                         │
 └─────────────────────────────────────────────────────────┘
 ```
+
+## Support
+
+If this extension has helped improve your daily workflow, consider supporting its ongoing development:
+
+- [Sponsor on GitHub Sponsors](https://github.com/sponsors/ritesh-777)
 
 ## Contributing
 

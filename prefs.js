@@ -34,7 +34,7 @@ function _findWSFPath() {
     const pathFound = GLib.find_program_in_path('wsf');
     if (pathFound) return pathFound;
 
-    const home = GLib.getenv('HOME');
+    const home = GLib.get_home_dir();
     const candidates = [
         home + '/.local/bin/wsf',
         '/usr/local/bin/wsf',
