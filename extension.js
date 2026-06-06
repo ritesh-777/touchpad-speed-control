@@ -367,10 +367,13 @@ export default class TouchpadSpeedControlExtension extends Extension {
     }
 
     _hidePanelIndicator() {
+        if (this._panelLabel) {
+            this._panelLabel.destroy();
+            this._panelLabel = null;
+        }
         if (this._panelButton) {
             this._panelButton.destroy();
             this._panelButton = null;
-            this._panelLabel = null;
         }
     }
 
