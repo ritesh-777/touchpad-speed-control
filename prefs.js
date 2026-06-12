@@ -17,6 +17,7 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Pango from 'gi://Pango';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 /**
@@ -674,8 +675,10 @@ class Settings {
 
         const label = new Gtk.Label({
             label: axis === 'v' ? _('Global vertical factor') : _('Global horizontal factor'),
-            hexpand: true,
             xalign: 0,
+            width_chars: 18,
+            max_width_chars: 18,
+            ellipsize: Pango.EllipsizeMode.END,
             css_classes: ['heading']
         });
 
@@ -698,7 +701,7 @@ class Settings {
 
         const adjustment = new Gtk.Adjustment({
             lower: 0.05,
-            upper: 5.00,
+            upper: 2.00,
             step_increment: 0.01,
             page_increment: 0.1,
             value: currentFactor
@@ -714,6 +717,7 @@ class Settings {
             orientation: Gtk.Orientation.HORIZONTAL,
             adjustment: adjustment,
             hexpand: true,
+            width_request: 180,
             draw_value: false,
             digits: 2
         });
@@ -766,7 +770,7 @@ class Settings {
         });
         plusBtn.connect('clicked', () => {
             const currentValue = adjustment.get_value();
-            const newValue = Math.min(5.00, currentValue + 0.01);
+            const newValue = Math.min(2.00, currentValue + 0.01);
             adjustment.set_value(newValue);
         });
 
@@ -987,8 +991,11 @@ class Settings {
 
         const nameLabel = new Gtk.Label({
             label: app.name,
-            hexpand: true,
             xalign: 0,
+            width_chars: 18,
+            max_width_chars: 18,
+            ellipsize: Pango.EllipsizeMode.END,
+            tooltip_text: app.name,
             css_classes: ['heading']
         });
 
@@ -1001,7 +1008,7 @@ class Settings {
 
         const adjustment = new Gtk.Adjustment({
             lower: 0.05,
-            upper: 5.00,
+            upper: 2.00,
             step_increment: 0.01,
             page_increment: 0.1,
             value: factor
@@ -1011,6 +1018,7 @@ class Settings {
             orientation: Gtk.Orientation.HORIZONTAL,
             adjustment: adjustment,
             hexpand: true,
+            width_request: 180,
             draw_value: false,
             digits: 2
         });
@@ -1060,7 +1068,7 @@ class Settings {
         });
         plusBtn.connect('clicked', () => {
             const currentValue = adjustment.get_value();
-            const newValue = Math.min(5.00, currentValue + 0.01);
+            const newValue = Math.min(2.00, currentValue + 0.01);
             adjustment.set_value(newValue);
         });
 
@@ -1337,8 +1345,11 @@ class Settings {
 
         const nameLabel = new Gtk.Label({
             label: app.name,
-            hexpand: true,
             xalign: 0,
+            width_chars: 18,
+            max_width_chars: 18,
+            ellipsize: Pango.EllipsizeMode.END,
+            tooltip_text: app.name,
             css_classes: ['heading']
         });
 
@@ -1351,7 +1362,7 @@ class Settings {
 
         const adjustment = new Gtk.Adjustment({
             lower: 0.05,
-            upper: 5.00,
+            upper: 2.00,
             step_increment: 0.01,
             page_increment: 0.1,
             value: factor
@@ -1361,6 +1372,7 @@ class Settings {
             orientation: Gtk.Orientation.HORIZONTAL,
             adjustment: adjustment,
             hexpand: true,
+            width_request: 180,
             draw_value: false,
             digits: 2
         });
@@ -1409,7 +1421,7 @@ class Settings {
         });
         plusBtn.connect('clicked', () => {
             const currentValue = adjustment.get_value();
-            const newValue = Math.min(5.00, currentValue + 0.01);
+            const newValue = Math.min(2.00, currentValue + 0.01);
             adjustment.set_value(newValue);
         });
 
