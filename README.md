@@ -1,6 +1,6 @@
 # Touchpad Speed Control
 
-[![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-47%E2%80%9350-blue.svg)](https://gnome.org)
+[![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-46%E2%80%9350-blue.svg)](https://gnome.org)
 [![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?style=flat&logo=github-sponsors)](https://github.com/sponsors/ritesh-777)
 
@@ -76,7 +76,7 @@ Controls horizontal (left/right) scroll speed with the same layout and options a
 
 | Control | Description |
 |---------|-------------|
-| **Slider** | Drag to adjust the scroll factor (0.05 – 5.00) |
+| **Slider** | Drag to adjust the scroll factor (0.05 – 2.00) |
 | **− / +** | Fine-tune by 0.01 increments |
 | **Search** | Filter applications by name or ID |
 | **Reset to Defaults** | Reset all factors to 1.0 for the current axis |
@@ -103,7 +103,7 @@ Scroll factors are cached and only updated when the application changes, minimiz
 | `0.35` | Moderate scrolling |
 | `0.50` | Slightly slow |
 | `1.00` | Default (no change) |
-| `5.00` | Very fast scrolling |
+| `2.00` | Fast scrolling |
 
 ## Troubleshooting
 
