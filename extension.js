@@ -561,37 +561,38 @@ export default class TouchpadSpeedControlExtension extends Extension {
             // Mark this app as processed
             this._lastAppliedAppId = appId;
 
-            // Apply vertical factor only if it differs from the cached value
-            // This avoids spawning a wsf subprocess when the factor hasn't changed
-            if (vFactor !== this._lastAppliedVFactor) {
+            // Apply both factors atomically in a single WSF invocation.
+            // Running separate vertical/horizontal processes can race because
+            // both commands modify the same WSF configuration.
+            if (
+                vFactor !== this._lastAppliedVFactor ||
+                hFactor !== this._lastAppliedHFactor
+            ) {
                 try {
                     Gio.Subprocess.new(
-                        [this._wsfPath, 'set', '--scroll-vertical', vFactor.toString()],
+                        [
+                            this._wsfPath,
+                            'set',
+                            '--scroll-vertical', vFactor.toString(),
+                            '--scroll-horizontal', hFactor.toString(),
+                        ],
                         Gio.SubprocessFlags.NONE
                     );
-                    log('Vertical WSF command executed');
-                } catch (e) {
-                    logError('Failed to execute vertical WSF: ' + e.message);
-                }
-                this._lastAppliedVFactor = vFactor;
-            } else {
-                log('Vertical factor unchanged, skipping');
-            }
 
-            // Apply horizontal factor only if it differs from the cached value
-            if (hFactor !== this._lastAppliedHFactor) {
-                try {
-                    Gio.Subprocess.new(
-                        [this._wsfPath, 'set', '--scroll-horizontal', hFactor.toString()],
-                        Gio.SubprocessFlags.NONE
+                    log(
+                        'WSF factors applied: V=' +
+                        vFactor +
+                        ' H=' +
+                        hFactor
                     );
-                    log('Horizontal WSF command executed');
+
+                    this._lastAppliedVFactor = vFactor;
+                    this._lastAppliedHFactor = hFactor;
                 } catch (e) {
-                    logError('Failed to execute horizontal WSF: ' + e.message);
+                    logError('Failed to execute WSF: ' + e.message);
                 }
-                this._lastAppliedHFactor = hFactor;
             } else {
-                log('Horizontal factor unchanged, skipping');
+                log('Scroll factors unchanged, skipping');
             }
         } catch (e) {
             logError('Error: ' + e.message);
