@@ -70,7 +70,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ### Prerequisites
 
-- GNOME Shell 50+ on Wayland
+- GNOME Shell 46–51 on Wayland
 - [Wayland Scroll Factor (WSF)](https://github.com/daniel-g-carrasco/wayland-scroll-factor) installed and active
 - GNOME Shell Extensions app
 
