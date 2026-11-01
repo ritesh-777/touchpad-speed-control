@@ -334,6 +334,41 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         focusRow.set_child(focusBox);
         generalGroup.add(focusRow);
 
+        const overviewRow = new Adw.PreferencesRow({ activatable: false });
+        const overviewBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const overviewLabels = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            hexpand: true
+        });
+        overviewLabels.append(new Gtk.Label({
+            label: _('Use global speed in the Overview'),
+            xalign: 0
+        }));
+        overviewLabels.append(new Gtk.Label({
+            label: _('While the Activities overview or app grid is open, scroll and swipe at the global speed instead of the focused app\'s.'),
+            xalign: 0,
+            wrap: true,
+            css_classes: ['dim-label', 'caption']
+        }));
+        const overviewSwitch = new Gtk.Switch({
+            active: window._settings.get_boolean('overview-global-factor'),
+            valign: Gtk.Align.CENTER
+        });
+        overviewSwitch.connect('notify::active', () => {
+            window._settings.set_boolean('overview-global-factor', overviewSwitch.get_active());
+        });
+        overviewBox.append(overviewLabels);
+        overviewBox.append(overviewSwitch);
+        overviewRow.set_child(overviewBox);
+        generalGroup.add(overviewRow);
+
         // Debugging information group
         const debugGroup = new Adw.PreferencesGroup({
             title: _('Debugging Information'),

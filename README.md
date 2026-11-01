@@ -59,6 +59,7 @@ The settings interface is organized into three tabs:
 - **Enable cursor tracking** — Detects which window is under the pointer even if it is not focused (enables "scroll focus follows mouse").
 - **Cursor check interval (ms)** — The shortest time between checks of which window is under the pointer while it moves (50ms – 2000ms, default 50ms). Lower values switch speeds sooner; nothing runs while the pointer is still.
 - **Enable focus detection** — Detects application changes when you switch active windows (e.g. via Alt+Tab or clicking).
+- **Use global speed in the Overview** — While the Activities overview or app grid is open, use the global speed instead of the focused app's, so swiping between workspaces is not slowed down by a slow app (on by default).
 - **Panel indicator** — Displays the currently applied vertical and horizontal factors in the GNOME Shell top panel status area for real-time diagnostics.
 - **Export/Import Settings** — Save or restore your custom scroll factors to/from a JSON backup file.
 

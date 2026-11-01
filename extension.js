@@ -135,6 +135,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._cursorTrackingEnabled = this._settings.get_boolean('cursor-tracking-enabled');
             this._cursorPollInterval = this._settings.get_int('cursor-poll-interval');
             this._focusDetectionEnabled = this._settings.get_boolean('focus-detection-enabled');
+            this._overviewUsesGlobal = this._settings.get_boolean('overview-global-factor');
             this._showPanelIndicatorEnabled = this._settings.get_boolean('show-panel-indicator');
 
             // Step 7: Start cursor tracking if enabled
@@ -190,6 +191,13 @@ export default class TouchpadSpeedControlExtension extends Extension {
                     } else {
                         this._hidePanelIndicator();
                     }
+                })
+            );
+
+            this._settingsChangedHandlers.push(
+                this._settings.connect('changed::overview-global-factor', () => {
+                    this._overviewUsesGlobal = this._settings.get_boolean('overview-global-factor');
+                    this._handleChange();
                 })
             );
 
@@ -413,7 +421,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
     /**
      * Connects signals for changes that can put a different window under a
      * stationary pointer: restacking (windows opened, closed or raised),
-     * workspace switches, and the overview closing.
+     * workspace switches, and the overview opening or closing.
      */
     _connectWindowChangeHandlers() {
         if (this._windowChangeHandlers.length) return;
@@ -421,7 +429,9 @@ export default class TouchpadSpeedControlExtension extends Extension {
         this._windowChangeHandlers.push(
             [global.display, global.display.connect('restacked', recheck)],
             [global.workspace_manager, global.workspace_manager.connect('active-workspace-changed', recheck)],
-            [Main.overview, Main.overview.connect('hidden', recheck)]
+            [Main.overview, Main.overview.connect('hidden', recheck)],
+            // Apply the overview behavior at once, before the user can swipe
+            [Main.overview, Main.overview.connect('showing', () => this._handleChange())]
         );
     }
 
@@ -552,7 +562,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
      * Triggered by:
      *   - Window focus changes (notify::focus-window signal)
      *   - Cursor moving to a different window (cursor tracker)
-     *   - Restacking, workspace switches, overview closing
+     *   - Restacking, workspace switches, overview opening and closing
      *   - Factor edits in preferences
      *
      * Flow:
@@ -568,6 +578,18 @@ export default class TouchpadSpeedControlExtension extends Extension {
      */
     _handleChange() {
         try {
+            // In the overview the pointer is over shell UI or window previews,
+            // not app windows, so use the global factors there (#8) — e.g.
+            // swiping between workspaces at the slow speed of the focused app
+            if (this._overviewUsesGlobal && Main.overview.visible) {
+                log('Overview open: using global factors');
+                this._applyIfChanged(
+                    this._settings.get_double('global-factor'),
+                    this._settings.get_double('h-global-factor')
+                );
+                return;
+            }
+
             // Prefer window under cursor; fall back to focused window
             const targetWindow = this._windowUnderCursor || global.display.focus_window;
             const source = this._windowUnderCursor ? 'cursor' : 'focus';
@@ -594,21 +616,29 @@ export default class TouchpadSpeedControlExtension extends Extension {
             const hFactor = this._resolveFactor('h', appId);
             log('Horizontal factor: ' + hFactor);
 
-            // Update panel indicator with the current factors
-            this._updatePanelLabel(vFactor, hFactor);
-
-            // Skip the wsf call if both factors are already applied
-            // This avoids spawning a wsf subprocess when nothing would change
-            if (vFactor === this._lastAppliedVFactor && hFactor === this._lastAppliedHFactor) {
-                log('Factors unchanged, skipping');
-                return;
-            }
-            this._lastAppliedVFactor = vFactor;
-            this._lastAppliedHFactor = hFactor;
-            this._applyFactors(vFactor, hFactor);
+            this._applyIfChanged(vFactor, hFactor);
         } catch (e) {
             logError('Error: ' + e.message);
         }
+    }
+
+    /**
+     * Shows the factors in the panel indicator and queues a `wsf set` unless
+     * both are already applied (avoids spawning wsf when nothing would change).
+     *
+     * @param {number} vFactor - Vertical scroll factor.
+     * @param {number} hFactor - Horizontal scroll factor.
+     */
+    _applyIfChanged(vFactor, hFactor) {
+        this._updatePanelLabel(vFactor, hFactor);
+
+        if (vFactor === this._lastAppliedVFactor && hFactor === this._lastAppliedHFactor) {
+            log('Factors unchanged, skipping');
+            return;
+        }
+        this._lastAppliedVFactor = vFactor;
+        this._lastAppliedHFactor = hFactor;
+        this._applyFactors(vFactor, hFactor);
     }
 
     /**
