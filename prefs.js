@@ -9,7 +9,7 @@
 // Architecture:
 //   - Three-page system: WSF missing → WSF inactive → Main tabbed UI
 //   - Two tabs: Vertical Scroll and Horizontal Scroll (Gtk.Stack + Gtk.StackSwitcher)
-//   - Each tab has: global factor slider, per-app sliders, search, reset, and sync buttons
+//   - Each tab has: global factor slider, wildcard rules, per-app sliders, search, reset, and sync buttons
 //   - _suppressSave flag prevents cascading GSettings writes during programmatic updates
 //   - Direct-data rendering for sync operations bypasses GSettings cache staleness
 
@@ -19,6 +19,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+
+import { isPattern, resolveFactor, validatePattern } from './factorResolver.js';
 
 /**
  * Locates the WSF CLI binary by searching PATH and common install locations.
@@ -461,6 +463,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         });
         vGroup.add(settingsUI.createFactorRow('v'));
         vGroup.add(settingsUI.vActionBox);
+        vGroup.add(settingsUI.vRulesBox);
         vGroup.add(settingsUI.vSearchEntry);
         vGroup.add(settingsUI.vAppList);
 
@@ -471,6 +474,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         });
         hGroup.add(settingsUI.createFactorRow('h'));
         hGroup.add(settingsUI.hActionBox);
+        hGroup.add(settingsUI.hRulesBox);
         hGroup.add(settingsUI.hSearchEntry);
         hGroup.add(settingsUI.hAppList);
 
@@ -632,6 +636,10 @@ class Settings {
         });
         hSyncButton.connect('clicked', () => this.syncHToV());
         this.hActionBox.append(hSyncButton);
+
+        // Wildcard rules (e.g. brave-*) for each axis
+        this.vRulesBox = this._createRulesBox('v');
+        this.hRulesBox = this._createRulesBox('h');
 
         // Search handlers — filter and re-render on text change
         this.vSearchEntry.connect('search-changed', () => {
@@ -934,6 +942,16 @@ class Settings {
      * @param {string} axis - 'v' for vertical, 'h' for horizontal.
      */
     renderAppList(axis) {
+        this._renderAppRows(axis);
+        this.renderRuleList(axis);
+    }
+
+    /**
+     * Renders only the per-app rows (not the rules) for the given axis.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     */
+    _renderAppRows(axis) {
         const listBox = axis === 'v' ? this.vListBox : this.hListBox;
 
         while (listBox.get_first_child()) {
@@ -959,9 +977,10 @@ class Settings {
      * @param {string} axis - 'v' for vertical, 'h' for horizontal.
      * @returns {Adw.PreferencesRow} The constructed preferences row.
      */
-    createAppRow(app, factors, axis) {
+    createAppRow(app, factors, axis, onRemove = null) {
         const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
-        const factor = factors[app.id] || this.schema.get_double(globalFactorKey);
+        const resolved = resolveFactor(factors, app.id, this.schema.get_double(globalFactorKey));
+        const factor = resolved.factor;
 
         const row = new Adw.PreferencesRow({
             activatable: false,
@@ -1005,6 +1024,9 @@ class Settings {
             xalign: 1,
             css_classes: ['dim-label']
         });
+        if (resolved.source === 'pattern' || resolved.source === 'partial') {
+            valueLabel.set_tooltip_text(_('Set by') + ' ' + resolved.key);
+        }
 
         const adjustment = new Gtk.Adjustment({
             lower: 0.05,
@@ -1079,6 +1101,17 @@ class Settings {
         box.append(valueLabel);
         box.append(plusBtn);
 
+        if (onRemove) {
+            const removeBtn = new Gtk.Button({
+                icon_name: 'user-trash-symbolic',
+                tooltip_text: _('Remove rule'),
+                css_classes: ['circular', 'flat'],
+                valign: Gtk.Align.CENTER
+            });
+            removeBtn.connect('clicked', onRemove);
+            box.append(removeBtn);
+        }
+
         row.set_child(box);
 
         return row;
@@ -1136,6 +1169,146 @@ class Settings {
 
         const variant = new GLib.Variant('a{sd}', factors);
         this.schema.set_value(factorsKey, variant);
+
+        // A rule can change the effective value of many app rows
+        if (isPattern(appId)) {
+            this._renderAppRows(axis);
+        }
+    }
+
+    /**
+     * Builds the wildcard rules section for one axis: a short explanation,
+     * the list of rules, and an entry for adding a new rule.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @returns {Gtk.Box} The rules section.
+     */
+    _createRulesBox(axis) {
+        const box = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 8,
+            margin_top: 4,
+            margin_bottom: 4,
+            margin_start: 10,
+            margin_end: 10
+        });
+
+        box.append(new Gtk.Label({
+            label: _('Rules'),
+            xalign: 0,
+            css_classes: ['heading']
+        }));
+        box.append(new Gtk.Label({
+            label: _('Give every app whose ID matches a rule the same speed, including apps installed later. ' +
+                '* matches anything, ? one character. Example: brave-* for all Brave web apps. ' +
+                'A speed set for a single app below takes priority.'),
+            xalign: 0,
+            wrap: true,
+            css_classes: ['dim-label']
+        }));
+
+        const ruleListBox = new Gtk.ListBox({
+            selection_mode: Gtk.SelectionMode.NONE,
+            css_classes: ['boxed-list'],
+            visible: false
+        });
+        box.append(ruleListBox);
+
+        const addBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8
+        });
+        const entry = new Gtk.Entry({
+            placeholder_text: 'brave-*',
+            hexpand: true
+        });
+        const addBtn = new Gtk.Button({
+            label: _('Add Rule'),
+            css_classes: ['suggested-action']
+        });
+        const add = () => {
+            if (this.addRule(axis, entry.get_text())) entry.set_text('');
+        };
+        addBtn.connect('clicked', add);
+        entry.connect('activate', add);
+        addBox.append(entry);
+        addBox.append(addBtn);
+        box.append(addBox);
+
+        if (axis === 'v') {
+            this.vRuleListBox = ruleListBox;
+        } else {
+            this.hRuleListBox = ruleListBox;
+        }
+        return box;
+    }
+
+    /**
+     * Renders the wildcard rules for the given axis.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @param {Object} [factors] - Factors to show; read from GSettings if omitted.
+     */
+    renderRuleList(axis, factors = null) {
+        const listBox = axis === 'v' ? this.vRuleListBox : this.hRuleListBox;
+        if (!listBox) return;
+
+        while (listBox.get_first_child()) {
+            listBox.remove(listBox.get_first_child());
+        }
+
+        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
+        if (!factors) factors = this.schema.get_value(factorsKey).deep_unpack();
+
+        const rules = Object.keys(factors).filter(isPattern).sort();
+        for (const rule of rules) {
+            const pseudoApp = { id: rule, name: rule, icon: 'edit-find-symbolic', exec: '' };
+            listBox.append(this.createAppRow(pseudoApp, factors, axis, () => this.removeRule(axis, rule)));
+        }
+        listBox.set_visible(rules.length > 0);
+    }
+
+    /**
+     * Adds a wildcard rule for the given axis, starting at the current global factor.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @param {string} rule - The rule text, e.g. 'brave-*'.
+     * @returns {boolean} True if the rule was added.
+     */
+    addRule(axis, rule) {
+        const error = validatePattern(rule);
+        if (error) {
+            this._showToast(_(error));
+            return false;
+        }
+
+        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
+        const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
+        const factors = this.schema.get_value(factorsKey).deep_unpack();
+        if (Object.prototype.hasOwnProperty.call(factors, rule)) {
+            this._showToast(_('That rule already exists'));
+            return false;
+        }
+
+        this.updateAppFactor(rule, this.schema.get_double(globalFactorKey), axis);
+        this.renderRuleList(axis);
+        this._showToast(_('Rule added'));
+        return true;
+    }
+
+    /**
+     * Removes a wildcard rule for the given axis.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @param {string} rule - The rule to remove.
+     */
+    removeRule(axis, rule) {
+        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
+        const factors = this.schema.get_value(factorsKey).deep_unpack();
+        delete factors[rule];
+        this.schema.set_value(factorsKey, new GLib.Variant('a{sd}', factors));
+        this.renderAppList(axis);
+        this._showToast(_('Rule removed'));
     }
 
     /**
@@ -1300,6 +1473,7 @@ class Settings {
             const row = this.createAppRowWithFactor(app, factors, globalFactor, axis);
             listBox.append(row);
         }
+        this.renderRuleList(axis, factors);
     }
 
     /**
@@ -1316,7 +1490,8 @@ class Settings {
      * @returns {Adw.PreferencesRow} The constructed preferences row.
      */
     createAppRowWithFactor(app, factors, globalFactor, axis) {
-        const factor = factors[app.id] || globalFactor;
+        const resolved = resolveFactor(factors, app.id, globalFactor);
+        const factor = resolved.factor;
 
         const row = new Adw.PreferencesRow({
             activatable: false,
@@ -1359,6 +1534,9 @@ class Settings {
             xalign: 1,
             css_classes: ['dim-label']
         });
+        if (resolved.source === 'pattern' || resolved.source === 'partial') {
+            valueLabel.set_tooltip_text(_('Set by') + ' ' + resolved.key);
+        }
 
         const adjustment = new Gtk.Adjustment({
             lower: 0.05,
@@ -1533,7 +1711,7 @@ class Settings {
                             const installedAppIds = new Set(this.apps.map(a => a.id));
                             const filtered = {};
                             for (const [appId, factor] of Object.entries(data.vertical.app_factors)) {
-                                if (installedAppIds.has(appId)) {
+                                if (installedAppIds.has(appId) || isPattern(appId)) {
                                     filtered[appId] = factor;
                                 }
                             }
@@ -1548,7 +1726,7 @@ class Settings {
                             const installedAppIds = new Set(this.apps.map(a => a.id));
                             const filtered = {};
                             for (const [appId, factor] of Object.entries(data.horizontal.app_factors)) {
-                                if (installedAppIds.has(appId)) {
+                                if (installedAppIds.has(appId) || isPattern(appId)) {
                                     filtered[appId] = factor;
                                 }
                             }

@@ -11,7 +11,7 @@
 //   - Factor caching: only calls `wsf` when the resolved factors actually differ from the cached values
 //   - Serialized WSF updates: one `wsf set` for both axes, never two in flight, latest values win
 //   - Battery optimization: no timers run while the pointer is idle
-//   - Factor resolution: per-app exact match → .desktop suffix match → partial substring match → global fallback
+//   - Factor resolution (factorResolver.js): exact ID → wildcard rules (e.g. brave-*) → partial match → global fallback
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
@@ -21,6 +21,8 @@ import St from 'gi://St';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+
+import { resolveFactor } from './factorResolver.js';
 
 /**
  * Locates the WSF CLI binary by searching PATH and common install locations.
@@ -536,11 +538,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
     /**
      * Resolves the scroll factor for a given app and axis.
      *
-     * Resolution order (first match wins):
-     *   1. Exact match on normalized app ID (without .desktop suffix)
-     *   2. Exact match on full app ID (with .desktop suffix)
-     *   3. Partial/prefix match (bidirectional substring matching)
-     *   4. Global factor fallback
+     * See resolveFactor() in factorResolver.js for the resolution order
+     * (exact ID, wildcard rules, partial match, global fallback).
      *
      * @param {string} axis - 'v' for vertical, 'h' for horizontal.
      * @param {string} appId - The application ID (e.g., 'org.mozilla.firefox.desktop').
@@ -554,40 +553,9 @@ export default class TouchpadSpeedControlExtension extends Extension {
         const factors = this._settings.get_value(appFactorsKey).deep_unpack();
         const globalFactor = this._settings.get_double(globalFactorKey);
 
-        // Normalize app ID by stripping .desktop suffix (8 characters)
-        const normalizedAppId = appId.endsWith('.desktop') ? appId.slice(0, -8) : appId;
-
-        let factor;
-
-        // Step 1: Try exact match on normalized app ID
-        factor = factors[normalizedAppId];
-
-        if (factor === undefined) {
-            // Step 2: Try exact match with .desktop suffix
-            factor = factors[appId];
-        }
-
-        if (factor === undefined) {
-            // Step 3: Try partial/prefix match (bidirectional)
-            // Matches if either the stored key is a substring of the app ID,
-            // or the app ID is a substring of the stored key.
-            for (const [key, value] of Object.entries(factors)) {
-                const normalizedKey = key.endsWith('.desktop') ? key.slice(0, -8) : key;
-                if (normalizedAppId.includes(normalizedKey) || normalizedKey.includes(normalizedAppId)) {
-                    factor = value;
-                    log(axisLabel + ' partial match: ' + key);
-                    break;
-                }
-            }
-        }
-
-        // Step 4: Use global factor if no per-app match found
-        if (factor === undefined) {
-            factor = globalFactor;
-            log(axisLabel + ' using global factor');
-        }
-
-        return factor;
+        const result = resolveFactor(factors, appId, globalFactor);
+        log(axisLabel + ' ' + result.source + ' match' + (result.key ? ': ' + result.key : ''));
+        return result.factor;
     }
 
     /**

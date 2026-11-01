@@ -66,7 +66,8 @@ The settings interface is organized into three tabs:
 
 Controls vertical (up/down) scroll speed:
 - **Global Factor** — The default scroll speed applied to all applications. Adjust the slider to change the baseline speed for every app.
-- **Per-App Sliders** — Individual scroll speed controls for each installed application. Apps with custom values override the global factor.
+- **Rules** — Give every app whose ID matches a wildcard rule the same speed, including apps installed later. `*` matches anything and `?` one character; for example `brave-*` covers every Brave web app. Rules ignore upper/lower case.
+- **Per-App Sliders** — Individual scroll speed controls for each installed application. Apps with custom values override rules and the global factor. Hover over a value to see which rule set it.
 
 #### 3. Horizontal Scroll
 
@@ -79,6 +80,7 @@ Controls horizontal (left/right) scroll speed with the same layout and options a
 | **Slider** | Drag to adjust the scroll factor (0.05 – 2.00) |
 | **− / +** | Fine-tune by 0.01 increments |
 | **Search** | Filter applications by name or ID |
+| **Add Rule / 🗑** | Add or remove a wildcard rule such as `brave-*` |
 | **Reset to Defaults** | Reset all factors to 1.0 for the current axis |
 | **Sync to Horizontal / Vertical** | Copy all settings from one axis to the other |
 | **Export Settings** | Save all factors to a JSON file |
@@ -93,6 +95,13 @@ The extension detects which application you're interacting with using two method
 2. **Cursor Tracking** — When you hover over an unfocused window and scroll (GNOME's "scroll focus follows mouse" behavior), the extension detects the window under your cursor and applies the correct factor.
 
 Scroll factors are cached and only updated when the application changes, minimizing system overhead.
+
+For each application the speed is chosen in this order:
+
+1. A speed set for that exact app (upper/lower case does not matter)
+2. The most specific matching rule (most letters besides `*` and `?`)
+3. A saved app ID that is part of the app's ID, or the other way round
+4. The global factor
 
 ### Scroll Factor Values
 
