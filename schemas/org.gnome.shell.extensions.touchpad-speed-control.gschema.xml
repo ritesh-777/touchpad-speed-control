@@ -65,21 +65,26 @@
     <key name="h-global-factor" type="d">
       <default>1.0</default>
     </key>
-    <key name="enabled" type="b">
-      <default>true</default>
-    </key>
     <key name="cursor-tracking-enabled" type="b">
       <default>true</default>
     </key>
     <key name="cursor-poll-interval" type="i">
-      <default>300</default>
+      <default>50</default>
       <range min="50" max="2000"/>
     </key>
     <key name="focus-detection-enabled" type="b">
       <default>true</default>
     </key>
+    <key name="overview-global-factor" type="b">
+      <default>true</default>
+      <summary>Use the global factors while the overview is open</summary>
+    </key>
     <key name="show-panel-indicator" type="b">
       <default>false</default>
+    </key>
+    <key name="debug-logging" type="b">
+      <default>false</default>
+      <summary>Log detection and WSF activity to the system journal</summary>
     </key>
   </schema>
 </schemalist>

@@ -32,7 +32,7 @@ Then **log out and log back in** for the changes to take effect.
 
 ### Method 1: GNOME Extensions Website (Recommended)
 
-Install from [extensions.gnome.org](https://extensions.gnome.org/) (coming soon).
+Install from [extensions.gnome.org](https://extensions.gnome.org/extension/10008/touchpad-speed-control/).
 
 ### Method 2: One-Line Install (Recommended for Manual Installation)
 
@@ -57,8 +57,9 @@ The settings interface is organized into three tabs:
 #### 1. General
 
 - **Enable cursor tracking** — Detects which window is under the pointer even if it is not focused (enables "scroll focus follows mouse").
-- **Poll interval (ms)** — Fine-tune how frequently the cursor position is polled (50ms – 2000ms). Lower values are more responsive; higher values save battery.
+- **Cursor check interval (ms)** — The shortest time between checks of which window is under the pointer while it moves (50ms – 2000ms, default 50ms). Lower values switch speeds sooner; nothing runs while the pointer is still.
 - **Enable focus detection** — Detects application changes when you switch active windows (e.g. via Alt+Tab or clicking).
+- **Use global speed in the Overview** — While the Activities overview or app grid is open, use the global speed instead of the focused app's, so swiping between workspaces is not slowed down by a slow app (on by default).
 - **Panel indicator** — Displays the currently applied vertical and horizontal factors in the GNOME Shell top panel status area for real-time diagnostics.
 - **Export/Import Settings** — Save or restore your custom scroll factors to/from a JSON backup file.
 
@@ -66,7 +67,8 @@ The settings interface is organized into three tabs:
 
 Controls vertical (up/down) scroll speed:
 - **Global Factor** — The default scroll speed applied to all applications. Adjust the slider to change the baseline speed for every app.
-- **Per-App Sliders** — Individual scroll speed controls for each installed application. Apps with custom values override the global factor.
+- **Rules** — Give every app whose ID matches a wildcard rule the same speed, including apps installed later. `*` matches anything and `?` one character; for example `brave-*` covers every Brave web app. Rules ignore upper/lower case.
+- **Per-App Sliders** — Individual scroll speed controls for each installed application. Apps with custom values override rules and the global factor. Hover over a value to see which rule set it.
 
 #### 3. Horizontal Scroll
 
@@ -79,6 +81,7 @@ Controls horizontal (left/right) scroll speed with the same layout and options a
 | **Slider** | Drag to adjust the scroll factor (0.05 – 2.00) |
 | **− / +** | Fine-tune by 0.01 increments |
 | **Search** | Filter applications by name or ID |
+| **Add Rule / 🗑** | Add or remove a wildcard rule such as `brave-*` |
 | **Reset to Defaults** | Reset all factors to 1.0 for the current axis |
 | **Sync to Horizontal / Vertical** | Copy all settings from one axis to the other |
 | **Export Settings** | Save all factors to a JSON file |
@@ -93,6 +96,13 @@ The extension detects which application you're interacting with using two method
 2. **Cursor Tracking** — When you hover over an unfocused window and scroll (GNOME's "scroll focus follows mouse" behavior), the extension detects the window under your cursor and applies the correct factor.
 
 Scroll factors are cached and only updated when the application changes, minimizing system overhead.
+
+For each application the speed is chosen in this order:
+
+1. A speed set for that exact app (upper/lower case does not matter)
+2. The most specific matching rule (most letters besides `*` and `?`)
+3. A saved app ID that is part of the app's ID, or the other way round
+4. The global factor
 
 ### Scroll Factor Values
 
@@ -148,34 +158,33 @@ Then **log out and log back in**. The preload requires a fresh session to take e
 ┌─────────────────────────────────────────────────────────┐
 │                    GNOME Shell                          │
 │                                                         │
-│  ┌──────────────┐    ┌──────────────┐                   │
-│  │ Focus Signal │    │ Cursor Poller│ (300ms)            │
-│  │ (event-driven│    │ (position    │                   │
-│  │  Alt+Tab,    │    │  deduped)    │                   │
-│  │  click)      │    │              │                   │
-│  └──────┬───────┘    └──────┬───────┘                   │
-│         │                   │                           │
-│         └────────┬──────────┘                           │
-│                  ▼                                      │
-│         ┌────────────────┐                              │
-│         │  _handleChange │                              │
-│         │  (app detect)  │                              │
-│         └────────┬───────┘                              │
-│                  │                                      │
-│         ┌────────▼────────┐                             │
-│         │ _resolveFactor  │                             │
-│         │ (v + h axes)    │                             │
-│         └────────┬────────┘                             │
-│                  │                                      │
-│         ┌────────▼────────┐                             │
-│         │  Factor Cache   │                             │
-│         │ (skip if same)  │                             │
-│         └────────┬────────┘                             │
-│                  │                                      │
-│    ┌─────────────┴─────────────┐                        │
-│    ▼                           ▼                        │
-│ wsf set --scroll-v    wsf set --scroll-h               │
-│ <factor>              <factor>                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │ Focus signal │  │ Cursor       │  │ Restack,     │   │
+│  │ (Alt+Tab,    │  │ tracker      │  │ workspace,   │   │
+│  │  click)      │  │ (on motion,  │  │ overview,    │   │
+│  │              │  │  ≤1 per 50ms)│  │ prefs edits  │   │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘   │
+│         └─────────────────┼─────────────────┘           │
+│                           ▼                             │
+│                  ┌────────────────┐                     │
+│                  │  _handleChange │                     │
+│                  │  (app detect)  │                     │
+│                  └────────┬───────┘                     │
+│                  ┌────────▼────────┐                    │
+│                  │ _resolveFactor  │                    │
+│                  │ (v + h axes)    │                    │
+│                  └────────┬────────┘                    │
+│                  ┌────────▼────────┐                    │
+│                  │  Factor cache   │                    │
+│                  │ (skip if same)  │                    │
+│                  └────────┬────────┘                    │
+│                  ┌────────▼────────┐                    │
+│                  │ Serialized queue│                    │
+│                  │ (one at a time, │                    │
+│                  │  latest wins)   │                    │
+│                  └────────┬────────┘                    │
+│                           ▼                             │
+│     wsf set --scroll-vertical V --scroll-horizontal H   │
 └─────────────────────────────────────────────────────────┘
 ```
 

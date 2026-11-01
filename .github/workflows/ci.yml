@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Check and build ZIP
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libglib2.0-bin zip unzip gjs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Pinned: tree-sitter 0.26 crashes Shexli 0.2.1's JavaScript parser
+      - name: Install Shexli
+        run: pip install 'shexli==0.2.1' 'tree-sitter==0.25.2' 'tree-sitter-javascript==0.25.0'
+
+      - name: Check and build
+        run: |
+          args=(--lint --require-clean -o dist/touchpad-speed-control.zip)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            args+=(--expect-version "${GITHUB_REF_NAME#v}")
+          fi
+          scripts/release.sh "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: touchpad-speed-control-zip
+          path: dist/touchpad-speed-control.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: touchpad-speed-control-zip
+          path: dist
+
+      - name: Create release with the ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum dist/touchpad-speed-control.zip
+          gh release create "$GITHUB_REF_NAME" dist/touchpad-speed-control.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Version ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --verify-tag
