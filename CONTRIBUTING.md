@@ -10,6 +10,7 @@ Thank you for your interest in contributing! This project welcomes bug reports, 
 - [Development Setup](#development-setup)
 - [Code Style](#code-style)
 - [Testing Changes](#testing-changes)
+- [Releasing](#releasing)
 
 ## Reporting Bugs
 
@@ -118,6 +119,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 | `prefs.js` | Preferences UI: settings panels, app discovery, GSettings binding |
 | `schemas/*.gschema.xml` | GSettings schema definition |
 | `metadata.json` | Extension metadata (version, GNOME Shell compatibility) |
+| `scripts/release.sh` | Checks the extension and builds the extensions.gnome.org upload ZIP |
 
 ## Code Style
 
@@ -161,6 +163,32 @@ _resolveFactor(axis, appId) {
 - New keys must be added to `schemas/org.gnome.shell.extensions.touchpad-speed-control.gschema.xml`
 - Recompile after changes: `glib-compile-schemas schemas/`
 - Use descriptive key names with hyphens (e.g., `global-factor`, `h-app-factors`)
+
+## Releasing
+
+Always build the upload ZIP with the release script, never by hand:
+
+```bash
+scripts/release.sh --lint
+```
+
+It checks `metadata.json`, the schema and the JavaScript syntax (when `node` is installed), builds `dist/touchpad-speed-control-v<version>.zip` from exactly the files that belong in the upload, and runs [Shexli](https://pypi.org/project/shexli/) on it. The ZIP is reproducible: the same commit always gives the same bytes. Install Shexli with:
+
+```bash
+pip install 'shexli==0.2.1' 'tree-sitter==0.25.2' 'tree-sitter-javascript==0.25.0'
+```
+
+Shexli 0.2.1 wrongly reports GNOME Shell 51 as a "future release" (`EGO-M-004`). The script accepts that one finding for the versions listed in `SHEXLI_ACCEPTED_FUTURE_VERSIONS`; any other finding fails the build.
+
+GitHub Actions runs the same checks on every push and pull request and keeps the ZIP as a build artifact. To publish a release:
+
+1. Increase `version` in `metadata.json` and commit it.
+2. Tag the commit with the same number and push the tag:
+   ```bash
+   git tag v6 && git push origin v6
+   ```
+3. CI checks that the tag matches `version`, then creates a GitHub release with the ZIP attached.
+4. Upload that ZIP at [extensions.gnome.org/upload](https://extensions.gnome.org/upload/).
 
 ## License
 
