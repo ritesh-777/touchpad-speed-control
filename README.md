@@ -32,7 +32,7 @@ Then **log out and log back in** for the changes to take effect.
 
 ### Method 1: GNOME Extensions Website (Recommended)
 
-Install from [extensions.gnome.org](https://extensions.gnome.org/) (coming soon).
+Install from [extensions.gnome.org](https://extensions.gnome.org/extension/10008/touchpad-speed-control/).
 
 ### Method 2: One-Line Install (Recommended for Manual Installation)
 

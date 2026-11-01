@@ -20,7 +20,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libglib2.0-bin zip unzip
+          sudo apt-get install -y --no-install-recommends libglib2.0-bin zip unzip gjs
 
       - uses: actions/setup-python@v5
         with:

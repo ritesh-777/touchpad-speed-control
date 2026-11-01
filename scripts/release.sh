@@ -3,7 +3,7 @@
 #
 # Usage: scripts/release.sh [options]
 #   -o, --output PATH         Write the ZIP here (default: dist/touchpad-speed-control-v<version>.zip)
-#   --lint                    Require Shexli (fail if it is not installed)
+#   --lint                    Require Shexli and gjs (fail if either is missing)
 #   --require-clean           Fail if release files differ from the last commit
 #   --expect-version N        Fail unless metadata.json "version" is N (used for tag releases)
 #   -h, --help                Show this help
@@ -20,9 +20,11 @@ RELEASE_FILES=(
     LICENSE
     README.md
     extension.js
+    factorResolver.js
     metadata.json
     prefs.js
     schemas/org.gnome.shell.extensions.touchpad-speed-control.gschema.xml
+    wsf.js
 )
 
 # Shell versions Shexli wrongly reports as "implausible future releases"
@@ -95,7 +97,7 @@ step "Checking JavaScript syntax"
 if command -v node >/dev/null; then
     tmp_js=$(mktemp -d)
     trap 'rm -rf "$tmp_js"' EXIT
-    for f in extension.js prefs.js; do
+    for f in $(printf '%s\n' "${RELEASE_FILES[@]}" | grep '\.js$'); do
         # .mjs makes node parse the file as an ES module without resolving imports
         cp "$f" "$tmp_js/$(basename "$f" .js).mjs"
         node --check "$tmp_js/$(basename "$f" .js).mjs" || fail "syntax error in $f"
@@ -103,6 +105,17 @@ if command -v node >/dev/null; then
     echo "ok"
 else
     echo "skipped (node not installed)"
+fi
+
+step "Running unit tests"
+if command -v gjs >/dev/null; then
+    for t in tests/*.test.js; do
+        gjs -m "$t" || fail "unit tests failed: $t"
+    done
+elif $lint; then
+    fail "gjs is required for the unit tests"
+else
+    echo "skipped (gjs not installed)"
 fi
 
 if $require_clean; then

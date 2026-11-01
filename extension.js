@@ -23,53 +23,29 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import { resolveFactor } from './factorResolver.js';
+import { findWSFPath, isWSFActive } from './wsf.js';
+
+// Verbose logging, controlled by the debug-logging setting (General tab)
+let debugLogging = false;
 
 /**
- * Locates the WSF CLI binary by searching PATH and common install locations.
+ * Logs a message to the journal only when debug logging is enabled.
+ * View with: journalctl -f -o cat | grep TouchpadSpeed
  *
- * Search order:
- *   1. $PATH (covers AUR at /usr/bin, system packages, custom paths)
- *   2. ~/.local/bin/wsf (manual builds with --prefix=$HOME/.local)
- *   3. /usr/local/bin/wsf (system-wide manual builds with default prefix)
- *   4. /usr/bin/wsf (AUR/distro packages explicitly)
- *
- * @returns {string|null} The full path to the wsf binary, or null if not found.
- */
-function _findWSFPath() {
-    const pathFound = GLib.find_program_in_path('wsf');
-    if (pathFound) return pathFound;
-
-    const home = GLib.get_home_dir();
-    const candidates = [
-        home + '/.local/bin/wsf',
-        '/usr/local/bin/wsf',
-        '/usr/bin/wsf',
-    ];
-    for (const p of candidates) {
-        if (Gio.File.new_for_path(p).query_exists(null)) return p;
-    }
-    return null;
-}
-
-// Set to true for verbose logging (useful for debugging, disable for production)
-const DEBUG = false;
-
-/**
- * Logs a message to the journal only when DEBUG is enabled.
- *
- * @param {string} message - The log message.
+ * @param {string} msg - The log message.
  */
 function log(msg) {
-    if (DEBUG) console.log('[TouchpadSpeed] ' + msg);
+    if (debugLogging) console.log('[TouchpadSpeed] ' + msg);
 }
 
 /**
- * Logs an error to the journal only when DEBUG is enabled.
+ * Logs an error to the journal. Errors are always logged so failures are
+ * never silent.
  *
- * @param {string} message - The error message.
+ * @param {string} msg - The error message.
  */
 function logError(msg) {
-    if (DEBUG) console.error('[TouchpadSpeed] ' + msg);
+    console.error('[TouchpadSpeed] ' + msg);
 }
 
 /**
@@ -86,32 +62,40 @@ export default class TouchpadSpeedControlExtension extends Extension {
      * Called when the extension is enabled.
      *
      * Flow:
-     *   1. Check if WSF binary exists (searches $PATH and common locations)
-     *   2. Check if WSF preload is active (enabled + library mapped into gnome-shell)
-     *   3. If either check fails, show a notification and abort
-     *   4. Load GSettings, initialize state, start cursor tracking
-     *   5. Connect to window focus change signal
-     *   6. Trigger initial factor application
+     *   1. Load GSettings (so the debug-logging setting applies immediately)
+     *   2. Check if WSF binary exists (searches $PATH and common locations)
+     *   3. Check in the background if WSF preload is active (enabled + library mapped)
+     *   4. If either check fails, show a notification and stop
+     *   5. Otherwise _startTracking(): initialize state, cursor tracking,
+     *      focus and window change handlers, then apply the initial factor
      */
-     enable() {
+    enable() {
+        // Load settings first so debug logging applies from the start
+        this._settings = this.getSettings();
+        debugLogging = this._settings.get_boolean('debug-logging');
+        this._debugLoggingHandler = this._settings.connect('changed::debug-logging', () => {
+            debugLogging = this._settings.get_boolean('debug-logging');
+        });
+
         log('===== ENABLE CALLED =====');
 
-        try {
-            // Step 1: Verify WSF binary exists
-            this._wsfPath = _findWSFPath();
-            if (!this._wsfPath) {
-                logError('WSF binary not found in PATH or common locations');
-                this._showNotification(
-                    'WSF Not Installed',
-                    'Touchpad Speed Control requires Wayland Scroll Factor (WSF). Please install it first: https://github.com/daniel-g-carrasco/wayland-scroll-factor'
-                );
-                return;
-            }
-            log('WSF found at: ' + this._wsfPath);
+        // Step 1: Verify WSF binary exists
+        this._wsfPath = findWSFPath();
+        if (!this._wsfPath) {
+            logError('WSF binary not found in PATH or common locations');
+            this._showNotification(
+                'WSF Not Installed',
+                'Touchpad Speed Control requires Wayland Scroll Factor (WSF). Please install it first: https://github.com/daniel-g-carrasco/wayland-scroll-factor'
+            );
+            return;
+        }
+        log('WSF found at: ' + this._wsfPath);
 
-            // Step 2: Verify WSF preload is active
-            const wsfActive = this._checkWSFStatus();
-            if (!wsfActive) {
+        // Step 2: Verify WSF preload is active, without blocking GNOME Shell
+        this._wsfCheckCancellable = new Gio.Cancellable();
+        this._checkWSFStatus(this._wsfCheckCancellable, active => {
+            this._wsfCheckCancellable = null;
+            if (!active) {
                 logError('WSF preload is not active');
                 this._showNotification(
                     'WSF Preload Not Active',
@@ -120,11 +104,15 @@ export default class TouchpadSpeedControlExtension extends Extension {
                 return;
             }
             log('WSF preload is active');
+            this._startTracking();
+        });
+    }
 
-            // Step 3: Load GSettings schema
-            this._settings = this.getSettings();
-            log('Settings loaded');
-
+    /**
+     * Starts app detection once WSF is known to be active (steps 4–12 of enable).
+     */
+    _startTracking() {
+        try {
             // Step 4: Get window tracker for app identification
             this._windowTracker = Shell.WindowTracker.get_default();
 
@@ -232,6 +220,15 @@ export default class TouchpadSpeedControlExtension extends Extension {
     disable() {
         log('===== DISABLE CALLED =====');
 
+        if (this._wsfCheckCancellable) {
+            this._wsfCheckCancellable.cancel();
+            this._wsfCheckCancellable = null;
+        }
+        if (this._settings && this._debugLoggingHandler) {
+            this._settings.disconnect(this._debugLoggingHandler);
+        }
+        this._debugLoggingHandler = null;
+
         this._stopCursorTracking();
         this._disconnectFocusHandler();
         this._disconnectWindowChangeHandlers();
@@ -259,45 +256,36 @@ export default class TouchpadSpeedControlExtension extends Extension {
     }
 
     /**
-     * Checks if WSF is properly installed and active.
+     * Checks whether WSF is active by running `wsf status` asynchronously,
+     * so GNOME Shell is not blocked while it runs.
      *
-     * Runs `wsf status` and parses the output for two critical conditions:
-     *   - "enabled: yes" — WSF environment.d config is in place
-     *   - "gnome-shell library mapped: yes" — libwsf_preload.so is loaded into gnome-shell
-     *
-     * Both conditions must be true for scroll factor changes to take effect.
-     *
-     * @returns {boolean} True if WSF is fully active, false otherwise.
+     * @param {Gio.Cancellable} cancellable - Cancelled by disable().
+     * @param {function(boolean)} callback - Receives true if WSF is fully
+     *   active; not called if the check was cancelled.
      */
-     _checkWSFStatus() {
+    _checkWSFStatus(cancellable, callback) {
+        let proc;
         try {
-            const subprocess = Gio.Subprocess.new(
+            proc = Gio.Subprocess.new(
                 [this._wsfPath, 'status'],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE
             );
-            const [, stdout] = subprocess.communicate_utf8(null, null);
-            subprocess.wait(null);
-
-            if (!stdout) return false;
-
-            const lines = stdout.split('\n');
-            let enabled = false;
-            let libraryMapped = false;
-
-            for (const line of lines) {
-                if (line.startsWith('enabled: yes')) {
-                    enabled = true;
-                }
-                if (line.startsWith('gnome-shell library mapped: yes')) {
-                    libraryMapped = true;
-                }
-            }
-
-            return enabled && libraryMapped;
         } catch (e) {
             logError('Failed to check WSF status: ' + e.message);
-            return false;
+            callback(false);
+            return;
         }
+
+        proc.communicate_utf8_async(null, cancellable, (p, result) => {
+            let stdout = null;
+            try {
+                [, stdout] = p.communicate_utf8_finish(result);
+            } catch (e) {
+                if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                logError('Failed to check WSF status: ' + e.message);
+            }
+            callback(isWSFActive(stdout));
+        });
     }
 
     /**

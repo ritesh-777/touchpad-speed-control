@@ -100,13 +100,14 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
    gnome-extensions enable touchpad-speed-control@ritesh
    ```
 
-6. Make changes to `extension.js` or `prefs.js`. After each change, reload:
-   ```bash
-   gnome-extensions disable touchpad-speed-control@ritesh && \
-   gnome-extensions enable touchpad-speed-control@ritesh
-   ```
+6. Make changes. GNOME Shell keeps an extension's code loaded until the session ends, so:
+   - changes to `extension.js`, `factorResolver.js` or `wsf.js` need a log out and back in;
+   - changes to `prefs.js` apply the next time the preferences window opens:
+     ```bash
+     gnome-extensions prefs touchpad-speed-control@ritesh
+     ```
 
-7. View logs in real-time:
+7. Turn on **Debug logging** in the General tab, then view logs in real time:
    ```bash
    journalctl -f -o cat | grep TouchpadSpeed
    ```
@@ -117,6 +118,9 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 |------|---------|
 | `extension.js` | GNOME Shell-side logic: window detection, factor resolution, WSF communication |
 | `prefs.js` | Preferences UI: settings panels, app discovery, GSettings binding |
+| `factorResolver.js` | Chooses an app's speed: exact ID, wildcard rules, partial match, global (shared, unit tested) |
+| `wsf.js` | Finds the `wsf` binary and reads `wsf status` (shared) |
+| `tests/` | Unit tests, run with `gjs -m` |
 | `schemas/*.gschema.xml` | GSettings schema definition |
 | `metadata.json` | Extension metadata (version, GNOME Shell compatibility) |
 | `scripts/release.sh` | Checks the extension and builds the extensions.gnome.org upload ZIP |
@@ -125,7 +129,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ### JavaScript
 
-- Use **2-space indentation**
+- Use **4-space indentation**
 - Use **single quotes** for strings
 - Use **JSDoc comments** for classes and public methods
 - Use `const` by default, `let` when reassignment is needed — never `var`
@@ -164,6 +168,28 @@ _resolveFactor(axis, appId) {
 - Recompile after changes: `glib-compile-schemas schemas/`
 - Use descriptive key names with hyphens (e.g., `global-factor`, `h-app-factors`)
 
+## Testing Changes
+
+Run the unit tests for the speed-matching logic (needs `gjs`, installed with GNOME):
+
+```bash
+gjs -m tests/factorResolver.test.js
+```
+
+Then test in GNOME Shell:
+
+1. Log out and back in so GNOME Shell loads the new code.
+2. Turn on **Debug logging** in the General tab and watch the log:
+   ```bash
+   journalctl -f -o cat | grep TouchpadSpeed
+   ```
+3. Move the pointer between apps with different speeds and check the applied values:
+   ```bash
+   wsf get
+   ```
+
+`scripts/release.sh` (below) runs the unit tests and the package checks together.
+
 ## Releasing
 
 Always build the upload ZIP with the release script, never by hand:
@@ -172,7 +198,7 @@ Always build the upload ZIP with the release script, never by hand:
 scripts/release.sh --lint
 ```
 
-It checks `metadata.json`, the schema and the JavaScript syntax (when `node` is installed), builds `dist/touchpad-speed-control-v<version>.zip` from exactly the files that belong in the upload, and runs [Shexli](https://pypi.org/project/shexli/) on it. The ZIP is reproducible: the same commit always gives the same bytes. Install Shexli with:
+It checks `metadata.json`, the schema, the JavaScript syntax (when `node` is installed) and the unit tests (when `gjs` is installed), builds `dist/touchpad-speed-control-v<version>.zip` from exactly the files that belong in the upload, and runs [Shexli](https://pypi.org/project/shexli/) on it. The ZIP is reproducible: the same commit always gives the same bytes. Install Shexli with:
 
 ```bash
 pip install 'shexli==0.2.1' 'tree-sitter==0.25.2' 'tree-sitter-javascript==0.25.0'

@@ -8,7 +8,7 @@
 //
 // Architecture:
 //   - Three-page system: WSF missing → WSF inactive → Main tabbed UI
-//   - Two tabs: Vertical Scroll and Horizontal Scroll (Gtk.Stack + Gtk.StackSwitcher)
+//   - Three tabs: General, Vertical Scroll and Horizontal Scroll (Gtk.Stack + Gtk.StackSwitcher)
 //   - Each tab has: global factor slider, wildcard rules, per-app sliders, search, reset, and sync buttons
 //   - _suppressSave flag prevents cascading GSettings writes during programmatic updates
 //   - Direct-data rendering for sync operations bypasses GSettings cache staleness
@@ -20,34 +20,8 @@ import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import { isPattern, resolveFactor, validatePattern } from './factorResolver.js';
-
-/**
- * Locates the WSF CLI binary by searching PATH and common install locations.
- *
- * Search order:
- *   1. $PATH (covers AUR at /usr/bin, system packages, custom paths)
- *   2. ~/.local/bin/wsf (manual builds with --prefix=$HOME/.local)
- *   3. /usr/local/bin/wsf (system-wide manual builds with default prefix)
- *   4. /usr/bin/wsf (AUR/distro packages explicitly)
- *
- * @returns {string|null} The full path to the wsf binary, or null if not found.
- */
-function _findWSFPath() {
-    const pathFound = GLib.find_program_in_path('wsf');
-    if (pathFound) return pathFound;
-
-    const home = GLib.get_home_dir();
-    const candidates = [
-        home + '/.local/bin/wsf',
-        '/usr/local/bin/wsf',
-        '/usr/bin/wsf',
-    ];
-    for (const p of candidates) {
-        if (Gio.File.new_for_path(p).query_exists(null)) return p;
-    }
-    return null;
-}
+import { isPattern, normalizeAppId, resolveFactor, validatePattern } from './factorResolver.js';
+import { findWSFPath, isWSFActive } from './wsf.js';
 
 /**
  * TouchpadSpeedControlPreferences
@@ -96,7 +70,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
      * @returns {Object} { installed: boolean, active: boolean }
      */
      _checkWSFStatus() {
-        const wsfPath = _findWSFPath();
+        const wsfPath = findWSFPath();
         if (!wsfPath) {
             return { installed: false, active: false };
         }
@@ -109,22 +83,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
             const [, stdout] = subprocess.communicate_utf8(null, null);
             subprocess.wait(null);
 
-            if (!stdout) return { installed: true, active: false };
-
-            const lines = stdout.split('\n');
-            let enabled = false;
-            let libraryMapped = false;
-
-            for (const line of lines) {
-                if (line.startsWith('enabled: yes')) {
-                    enabled = true;
-                }
-                if (line.startsWith('gnome-shell library mapped: yes')) {
-                    libraryMapped = true;
-                }
-            }
-
-            return { installed: true, active: enabled && libraryMapped };
+            return { installed: true, active: isWSFActive(stdout) };
         } catch (e) {
             return { installed: true, active: false };
         }
@@ -378,7 +337,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         // Debugging information group
         const debugGroup = new Adw.PreferencesGroup({
             title: _('Debugging Information'),
-            description: _('Show diagnostic information in the top panel.')
+            description: _('Diagnostics for checking which speed is applied.')
         });
 
         const panelRow = new Adw.PreferencesRow({ activatable: false });
@@ -406,6 +365,42 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         panelBox.append(panelSwitch);
         panelRow.set_child(panelBox);
         debugGroup.add(panelRow);
+
+        const debugLogRow = new Adw.PreferencesRow({ activatable: false });
+        const debugLogBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const debugLogLabels = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            hexpand: true
+        });
+        debugLogLabels.append(new Gtk.Label({
+            label: _('Debug logging'),
+            xalign: 0
+        }));
+        debugLogLabels.append(new Gtk.Label({
+            label: _('Log detected apps and applied speeds. View with: journalctl -f -o cat | grep TouchpadSpeed'),
+            xalign: 0,
+            wrap: true,
+            selectable: true,
+            css_classes: ['dim-label', 'caption']
+        }));
+        const debugLogSwitch = new Gtk.Switch({
+            active: window._settings.get_boolean('debug-logging'),
+            valign: Gtk.Align.CENTER
+        });
+        debugLogSwitch.connect('notify::active', () => {
+            window._settings.set_boolean('debug-logging', debugLogSwitch.get_active());
+        });
+        debugLogBox.append(debugLogLabels);
+        debugLogBox.append(debugLogSwitch);
+        debugLogRow.set_child(debugLogBox);
+        debugGroup.add(debugLogRow);
 
         // Import/Export: add buttons at the bottom of the General group
         const ioBox = new Gtk.Box({
@@ -517,9 +512,9 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
  * Key design decisions:
  *   - _suppressSave flag prevents cascading GSettings writes when programmatically
  *     updating slider values (e.g., during sync or reset operations)
- *   - renderAppListWithFactors() and createAppRowWithFactor() accept factor data
+ *   - renderAppListWithFactors() passes factor data to createAppRow()
  *     directly instead of re-reading from GSettings, avoiding cache staleness issues
- *   - loadApps() scans .desktop files once and shares the result between both tabs
+ *   - loadApps() reads the installed apps once (via Gio.AppInfo) and shares the result between both tabs
  *   - Debounced saves (200ms) prevent excessive D-Bus traffic during slider dragging
  */
 class Settings {
@@ -794,26 +789,17 @@ class Settings {
     }
 
     /**
-     * Scans .desktop files from system and user data directories to discover
-     * installed applications. Populates this.apps with app metadata.
+     * Discovers installed applications through GIO (the same list GNOME uses)
+     * and populates this.apps with app metadata.
      *
      * Filtering rules:
-     *   - Skips NoDisplay=true entries (hidden from app menus)
-     *   - Skips entries with OnlyShowIn that excludes GNOME
-     *   - Skips URL handler variants if a base app already exists
+     *   - Skips apps GNOME would not show (NoDisplay, Hidden, OnlyShowIn/NotShowIn)
+     *   - Skips URL handler variants (e.g. code-url-handler) when the base app exists
      *
      * Sorting: known apps (Chrome, Firefox, VS Code, etc.) are prioritized to the top,
      * then alphabetically within each group.
      */
     loadApps() {
-        const dataDirs = GLib.get_system_data_dirs();
-        const userDataDir = GLib.get_user_data_dir();
-
-        const appDirs = [
-            userDataDir + '/applications/',
-            ...dataDirs.map(dir => dir + '/applications/')
-        ];
-
         // Common apps to prioritize at the top of the list
         const knownApps = [
             'chrome', 'google-chrome-stable', 'google-chrome-unstable',
@@ -827,71 +813,28 @@ class Settings {
 
         const appMap = new Map();
 
-        for (const dirPath of appDirs) {
-            const dir = Gio.File.new_for_path(dirPath);
-            if (!dir.query_exists(null)) continue;
+        for (const info of Gio.AppInfo.get_all()) {
+            if (!info.should_show()) continue;
 
-            try {
-                const enumerator = dir.enumerate_children(
-                    'standard::*',
-                    Gio.FileQueryInfoFlags.NONE,
-                    null
-                );
+            const appId = normalizeAppId(info.get_id() || '');
+            if (!appId || appMap.has(appId)) continue;
 
-                let info;
-                while ((info = enumerator.next_file(null)) !== null) {
-                    const fileName = info.get_name();
-                    if (!fileName.endsWith('.desktop')) continue;
+            appMap.set(appId, {
+                id: appId,
+                name: info.get_display_name(),
+                gicon: info.get_icon(),
+                icon: 'application-x-executable',
+                exec: info.get_commandline() || ''
+            });
+        }
 
-                    const appId = fileName.replace('.desktop', '');
-                    if (appMap.has(appId)) continue;
-
-                    const desktopFile = GLib.build_filenamev([dirPath, fileName]);
-                    const keyFile = new GLib.KeyFile();
-
-                    try {
-                        keyFile.load_from_file(desktopFile, GLib.KeyFileFlags.NONE);
-
-                        // Skip hidden apps
-                        try {
-                            if (keyFile.get_boolean('Desktop Entry', 'NoDisplay')) continue;
-                        } catch (e) {}
-
-                        // Skip non-GNOME apps
-                        try {
-                            const onlyShowIn = keyFile.get_string('Desktop Entry', 'OnlyShowIn');
-                            if (onlyShowIn && !onlyShowIn.includes('GNOME')) continue;
-                        } catch (e) {}
-
-                        const name = keyFile.get_string('Desktop Entry', 'Name');
-                        let icon = 'application-x-executable';
-                        try {
-                            icon = keyFile.get_string('Desktop Entry', 'Icon');
-                        } catch (e) {}
-
-                        let exec = '';
-                        try {
-                            exec = keyFile.get_string('Desktop Entry', 'Exec');
-                        } catch (e) {}
-
-                        // Skip URL handler variants if base app exists
-                        if (exec && (exec.includes(' %u') || exec.includes(' %U'))) {
-                            const baseAppId = appId.replace('-url-handler', '').replace('-default', '');
-                            if (appMap.has(baseAppId)) continue;
-                        }
-
-                        appMap.set(appId, {
-                            id: appId,
-                            name: name,
-                            icon: icon,
-                            exec: exec
-                        });
-                    } catch (e) {
-                        continue;
-                    }
-                }
-            } catch (e) {
-                continue;
+        // Skip URL handler variants if the base app exists. Done after
+        // collecting everything so the result does not depend on scan order.
+        for (const [appId, app] of [...appMap]) {
+            if (!/ %[uU]\b/.test(app.exec)) continue;
+            const baseAppId = appId.replace('-url-handler', '').replace('-default', '');
+            if (baseAppId !== appId && appMap.has(baseAppId)) {
+                appMap.delete(appId);
             }
         }
 
@@ -972,14 +915,18 @@ class Settings {
     /**
      * Creates a per-app factor slider row.
      *
-     * @param {Object} app - App metadata { id, name, icon, exec }.
-     * @param {Object} factors - The per-app factors dictionary from GSettings.
+     * @param {Object} app - App metadata { id, name, icon, gicon, exec }.
+     * @param {Object} factors - The per-app factors dictionary.
      * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @param {function|null} [onRemove] - Adds a remove button (used for rules).
+     * @param {number|null} [globalFactor] - Global factor to fall back to; read
+     *   from GSettings if null.
      * @returns {Adw.PreferencesRow} The constructed preferences row.
      */
-    createAppRow(app, factors, axis, onRemove = null) {
+    createAppRow(app, factors, axis, onRemove = null, globalFactor = null) {
         const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
-        const resolved = resolveFactor(factors, app.id, this.schema.get_double(globalFactorKey));
+        if (globalFactor === null) globalFactor = this.schema.get_double(globalFactorKey);
+        const resolved = resolveFactor(factors, app.id, globalFactor);
         const factor = resolved.factor;
 
         const row = new Adw.PreferencesRow({
@@ -997,9 +944,13 @@ class Settings {
         });
 
         const icon = new Gtk.Image({
-            icon_name: app.icon,
             pixel_size: 32
         });
+        if (app.gicon) {
+            icon.set_from_gicon(app.gicon);
+        } else {
+            icon.set_from_icon_name(app.icon);
+        }
 
         // Fallback for missing icons
         icon.connect('notify::gicon', () => {
@@ -1470,149 +1421,10 @@ class Settings {
         const apps = axis === 'v' ? this.vFilteredApps : this.hFilteredApps;
 
         for (const app of apps) {
-            const row = this.createAppRowWithFactor(app, factors, globalFactor, axis);
+            const row = this.createAppRow(app, factors, axis, null, globalFactor);
             listBox.append(row);
         }
         this.renderRuleList(axis, factors);
-    }
-
-    /**
-     * Creates a per-app factor slider row using pre-resolved factor data.
-     *
-     * Identical to createAppRow() but accepts factors and globalFactor directly
-     * instead of reading from GSettings. This ensures the rendered values match
-     * the source axis exactly during sync operations.
-     *
-     * @param {Object} app - App metadata { id, name, icon, exec }.
-     * @param {Object} factors - The source per-app factors dictionary.
-     * @param {number} globalFactor - The source global factor value.
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @returns {Adw.PreferencesRow} The constructed preferences row.
-     */
-    createAppRowWithFactor(app, factors, globalFactor, axis) {
-        const resolved = resolveFactor(factors, app.id, globalFactor);
-        const factor = resolved.factor;
-
-        const row = new Adw.PreferencesRow({
-            activatable: false,
-            css_classes: ['property-row']
-        });
-
-        const box = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-
-        const icon = new Gtk.Image({
-            icon_name: app.icon,
-            pixel_size: 32
-        });
-
-        icon.connect('notify::gicon', () => {
-            if (!icon.get_icon_name() && !icon.get_gicon()) {
-                icon.set_from_icon_name('application-x-executable');
-            }
-        });
-
-        const nameLabel = new Gtk.Label({
-            label: app.name,
-            xalign: 0,
-            width_chars: 18,
-            max_width_chars: 18,
-            ellipsize: Pango.EllipsizeMode.END,
-            tooltip_text: app.name,
-            css_classes: ['heading']
-        });
-
-        const valueLabel = new Gtk.Label({
-            label: factor.toFixed(2),
-            width_chars: 5,
-            xalign: 1,
-            css_classes: ['dim-label']
-        });
-        if (resolved.source === 'pattern' || resolved.source === 'partial') {
-            valueLabel.set_tooltip_text(_('Set by') + ' ' + resolved.key);
-        }
-
-        const adjustment = new Gtk.Adjustment({
-            lower: 0.05,
-            upper: 2.00,
-            step_increment: 0.01,
-            page_increment: 0.1,
-            value: factor
-        });
-
-        const scale = new Gtk.Scale({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            adjustment: adjustment,
-            hexpand: true,
-            width_request: 180,
-            draw_value: false,
-            digits: 2
-        });
-
-        scale.add_mark(0.15, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(0.35, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(0.50, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(1.00, Gtk.PositionType.BOTTOM, null);
-
-        let saveTimeout = null;
-        adjustment.connect('value-changed', () => {
-            if (this._suppressSave) {
-                if (saveTimeout) {
-                    GLib.source_remove(saveTimeout);
-                    saveTimeout = null;
-                }
-                return;
-            }
-            const newValue = adjustment.get_value();
-            valueLabel.set_label(newValue.toFixed(2));
-            if (saveTimeout) GLib.source_remove(saveTimeout);
-            saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-                this.updateAppFactor(app.id, newValue, axis);
-                saveTimeout = null;
-                return GLib.SOURCE_REMOVE;
-            });
-        });
-
-        const minusBtn = new Gtk.Button({
-            label: '−',
-            css_classes: ['circular', 'flat'],
-            width_request: 32,
-            height_request: 32
-        });
-        minusBtn.connect('clicked', () => {
-            const currentValue = adjustment.get_value();
-            const newValue = Math.max(0.05, currentValue - 0.01);
-            adjustment.set_value(newValue);
-        });
-
-        const plusBtn = new Gtk.Button({
-            label: '+',
-            css_classes: ['circular', 'flat'],
-            width_request: 32,
-            height_request: 32
-        });
-        plusBtn.connect('clicked', () => {
-            const currentValue = adjustment.get_value();
-            const newValue = Math.min(2.00, currentValue + 0.01);
-            adjustment.set_value(newValue);
-        });
-
-        box.append(icon);
-        box.append(nameLabel);
-        box.append(scale);
-        box.append(minusBtn);
-        box.append(valueLabel);
-        box.append(plusBtn);
-
-        row.set_child(box);
-
-        return row;
     }
 
     /**
