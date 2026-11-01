@@ -325,7 +325,7 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
             margin_bottom: 8
         });
         const intervalLabel = new Gtk.Label({
-            label: _('Poll interval (ms)'),
+            label: _('Cursor check interval (ms)'),
             hexpand: true,
             xalign: 0
         });

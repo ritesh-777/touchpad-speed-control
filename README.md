@@ -57,7 +57,7 @@ The settings interface is organized into three tabs:
 #### 1. General
 
 - **Enable cursor tracking** — Detects which window is under the pointer even if it is not focused (enables "scroll focus follows mouse").
-- **Poll interval (ms)** — Fine-tune how frequently the cursor position is polled (50ms – 2000ms). Lower values are more responsive; higher values save battery.
+- **Cursor check interval (ms)** — The shortest time between checks of which window is under the pointer while it moves (50ms – 2000ms, default 50ms). Lower values switch speeds sooner; nothing runs while the pointer is still.
 - **Enable focus detection** — Detects application changes when you switch active windows (e.g. via Alt+Tab or clicking).
 - **Panel indicator** — Displays the currently applied vertical and horizontal factors in the GNOME Shell top panel status area for real-time diagnostics.
 - **Export/Import Settings** — Save or restore your custom scroll factors to/from a JSON backup file.
@@ -148,34 +148,33 @@ Then **log out and log back in**. The preload requires a fresh session to take e
 ┌─────────────────────────────────────────────────────────┐
 │                    GNOME Shell                          │
 │                                                         │
-│  ┌──────────────┐    ┌──────────────┐                   │
-│  │ Focus Signal │    │ Cursor Poller│ (300ms)            │
-│  │ (event-driven│    │ (position    │                   │
-│  │  Alt+Tab,    │    │  deduped)    │                   │
-│  │  click)      │    │              │                   │
-│  └──────┬───────┘    └──────┬───────┘                   │
-│         │                   │                           │
-│         └────────┬──────────┘                           │
-│                  ▼                                      │
-│         ┌────────────────┐                              │
-│         │  _handleChange │                              │
-│         │  (app detect)  │                              │
-│         └────────┬───────┘                              │
-│                  │                                      │
-│         ┌────────▼────────┐                             │
-│         │ _resolveFactor  │                             │
-│         │ (v + h axes)    │                             │
-│         └────────┬────────┘                             │
-│                  │                                      │
-│         ┌────────▼────────┐                             │
-│         │  Factor Cache   │                             │
-│         │ (skip if same)  │                             │
-│         └────────┬────────┘                             │
-│                  │                                      │
-│    ┌─────────────┴─────────────┐                        │
-│    ▼                           ▼                        │
-│ wsf set --scroll-v    wsf set --scroll-h               │
-│ <factor>              <factor>                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │ Focus signal │  │ Cursor       │  │ Restack,     │   │
+│  │ (Alt+Tab,    │  │ tracker      │  │ workspace,   │   │
+│  │  click)      │  │ (on motion,  │  │ overview,    │   │
+│  │              │  │  ≤1 per 50ms)│  │ prefs edits  │   │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘   │
+│         └─────────────────┼─────────────────┘           │
+│                           ▼                             │
+│                  ┌────────────────┐                     │
+│                  │  _handleChange │                     │
+│                  │  (app detect)  │                     │
+│                  └────────┬───────┘                     │
+│                  ┌────────▼────────┐                    │
+│                  │ _resolveFactor  │                    │
+│                  │ (v + h axes)    │                    │
+│                  └────────┬────────┘                    │
+│                  ┌────────▼────────┐                    │
+│                  │  Factor cache   │                    │
+│                  │ (skip if same)  │                    │
+│                  └────────┬────────┘                    │
+│                  ┌────────▼────────┐                    │
+│                  │ Serialized queue│                    │
+│                  │ (one at a time, │                    │
+│                  │  latest wins)   │                    │
+│                  └────────┬────────┘                    │
+│                           ▼                             │
+│     wsf set --scroll-vertical V --scroll-horizontal H   │
 └─────────────────────────────────────────────────────────┘
 ```
 

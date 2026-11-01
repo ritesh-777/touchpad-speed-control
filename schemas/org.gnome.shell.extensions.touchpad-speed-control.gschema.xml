@@ -72,7 +72,7 @@
       <default>true</default>
     </key>
     <key name="cursor-poll-interval" type="i">
-      <default>300</default>
+      <default>50</default>
       <range min="50" max="2000"/>
     </key>
     <key name="focus-detection-enabled" type="b">
