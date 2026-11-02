@@ -60,15 +60,15 @@ The settings interface is organized into three tabs:
 - **Cursor check interval (ms)** — The shortest time between checks of which window is under the pointer while it moves (50ms – 2000ms, default 50ms). Lower values switch speeds sooner; nothing runs while the pointer is still.
 - **Enable focus detection** — Detects application changes when you switch active windows (e.g. via Alt+Tab or clicking).
 - **Use global speed in the Overview** — While the Activities overview or app grid is open, use the global speed instead of the focused app's, so swiping between workspaces is not slowed down by a slow app (on by default).
-- **Quick Settings tile** — A Touchpad Speed tile in Quick Settings (on by default) shows the applied speeds. Click it to open these settings; open its menu for − / + buttons that change the focused app's vertical and horizontal speed, and for the calibration actions.
+- **Quick Settings tile** — A Touchpad tile in Quick Settings (on by default) shows the applied speeds. Click it to open these settings; open its menu for − / + buttons that change the focused app's vertical and horizontal speed, and for the calibration actions.
 - **Calibration** — Lists the apps you have measured (see [Matching apps automatically](#matching-apps-automatically)): the reference app, how much faster or slower each app scrolls than it, a switch to make an app follow the reference, ★ to make it the reference, and 🗑 to forget a measurement.
-- **Panel indicator** — Displays the currently applied vertical and horizontal factors in the GNOME Shell top panel status area for real-time diagnostics. Its menu also has the calibration actions.
-- **Export/Import Settings** — Save or restore your custom scroll factors to/from a JSON backup file.
+- **Panel indicator** — Displays the currently applied vertical and horizontal factors in the GNOME Shell top panel status area for real-time diagnostics.
+- **Export/Import Settings** — Save or restore all speeds, rules and calibration as a JSON file.
 
 #### 2. Vertical Scroll
 
 Controls vertical (up/down) scroll speed:
-- **Global Factor** — The default scroll speed applied to all applications. Adjust the slider to change the baseline speed for every app.
+- **Global speed** — The default scroll speed. Moving it sets every app to the same speed (calibrated apps keep their ratio to the reference).
 - **Rules** — Give every app whose ID matches a wildcard rule the same speed, including apps installed later. `*` matches anything and `?` one character; for example `brave-*` covers every Brave web app. Rules ignore upper/lower case.
 - **Per-App Sliders** — Individual scroll speed controls for each installed application. Apps with custom values override rules and the global factor. Hover over a value to see which rule set it.
 
@@ -84,8 +84,8 @@ Controls horizontal (left/right) scroll speed with the same layout and options a
 | **− / +** | Fine-tune by 0.01 increments |
 | **Search** | Filter applications by name or ID |
 | **Add Rule / 🗑** | Add or remove a wildcard rule such as `brave-*` |
-| **Reset to Defaults** | Reset all factors to 1.0 for the current axis |
-| **Sync to Horizontal / Vertical** | Copy all settings from one axis to the other |
+| **Reset** | Reset all factors to 1.0 for the current axis |
+| **Copy to Horizontal / Vertical** | Copy all settings from one axis to the other |
 | **Export Settings** | Save all factors to a JSON file |
 | **Import Settings** | Load all factors from a JSON file |
 
@@ -112,11 +112,13 @@ For each application the speed is chosen in this order:
 
 Apps scroll different distances for the same swipe: on a typical system Chrome and other Chromium-based apps scroll about six times as far as GTK apps such as Files or Text Editor. Instead of tuning every app by hand, you can measure each app once and let it follow one **reference** app whose speed you like.
 
-1. Open the **Touchpad Speed** tile's menu in Quick Settings (the arrow next to the tile). The same actions are in the panel indicator's menu if you turn that on.
+1. Open the **Touchpad** tile's menu in Quick Settings (the arrow next to the tile).
 2. Open a long page or document in the app you want as the reference (for example Text Editor), scroll to the middle and click into it. From the tile's menu, choose **Use … as scroll reference**. Keep your hands off the touchpad for a few seconds: the extension scrolls the page a little, measures how far it moved, and scrolls it back.
 3. Do the same in each other app, choosing **Match … to …** instead.
 
-Matched apps get the factor that makes a swipe move the same distance as in the reference, on both axes. Horizontal scrolling uses the same ratio unless you measure it too: open something that scrolls sideways (a wide table, long lines of code, Files' column view) and choose **Measure horizontal scrolling of …** from the tile's menu. The horizontal factor then comes from how far the app scrolls sideways compared with the reference. The reference is taken to scroll as far sideways as vertically unless you measure it sideways too. Some views scroll far faster sideways than down; Files' column view moves about 25 times as far, and its factor may hit WSF's minimum of 0.05. They keep following it: change the reference app's speed or the global factor and every matched app is recalculated, so one slider sets the feel everywhere. Setting a matched app's speed by hand stops it following.
+Matched apps get the factor that makes a swipe move the same distance as in the reference, on both axes, and keep following it: change the reference app's speed or the global factor and every matched app is recalculated, so one slider sets the feel everywhere. Setting a matched app's speed by hand stops it following.
+
+Horizontal scrolling uses the same ratio unless you measure it too: open something that scrolls sideways (a wide table, long lines of code, Files' column view) and choose **Measure horizontal scrolling of …** from the tile's menu. The horizontal factor then comes from how far the app scrolls sideways compared with the reference, which is taken to scroll as far sideways as vertically unless you measure it too. Some views scroll far faster sideways than down; Files' column view moves about 25 times as far, and its factor may hit WSF's minimum of 0.05.
 
 Measurements run on your own machine, so your touchpad, display scaling and app versions are taken into account. Pick a page with plenty of text, away from its top and bottom; a chat that sits at its bottom is fine, since calibration then measures by scrolling up.
 
