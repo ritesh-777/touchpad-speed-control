@@ -79,6 +79,10 @@
       <default>true</default>
       <summary>Use the global factors while the overview is open</summary>
     </key>
+    <key name="show-quick-settings" type="b">
+      <default>true</default>
+      <summary>Show the Touchpad Speed tile in Quick Settings</summary>
+    </key>
     <key name="show-panel-indicator" type="b">
       <default>false</default>
     </key>

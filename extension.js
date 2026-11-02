@@ -12,7 +12,8 @@
 //   - Serialized WSF updates: one `wsf set` for both axes, never two in flight, latest values win
 //   - Battery optimization: no timers run while the pointer is idle
 //   - Factor resolution (factorResolver.js): exact ID → wildcard rules (e.g. brave-*) → partial match → global fallback
-//   - Calibration (calibration.js, panel menu): measures how far an app scrolls per unit and
+//   - Quick Settings tile: current speeds, − / + for the focused app, calibration actions
+//   - Calibration (calibration.js, tile and panel menus): measures how far an app scrolls per unit and
 //     keeps its factors matched to a chosen reference app, so a swipe moves the same distance
 
 import GLib from 'gi://GLib';
@@ -22,12 +23,18 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import { measureWindowGain } from './calibration.js';
-import { applyMatchedFactors, horizontalMatchingGains, resolveFactor } from './factorResolver.js';
+import { applyMatchedFactors, horizontalMatchingGains, normalizeAppId, resolveFactor } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
+
+// Range and step of the Quick Settings − / + buttons, as in the preferences
+const FACTOR_MIN = 0.05;
+const FACTOR_MAX = 2.0;
+const FACTOR_STEP = 0.01;
 
 // Verbose logging, controlled by the debug-logging setting (General tab)
 let debugLogging = false;
@@ -141,6 +148,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._focusDetectionEnabled = this._settings.get_boolean('focus-detection-enabled');
             this._overviewUsesGlobal = this._settings.get_boolean('overview-global-factor');
             this._showPanelIndicatorEnabled = this._settings.get_boolean('show-panel-indicator');
+            this._calibrationItemSets = [];
+            this._calibrationHandlers = new Map();
 
             // Step 7: Start cursor tracking if enabled
             if (this._cursorTrackingEnabled) {
@@ -152,9 +161,12 @@ export default class TouchpadSpeedControlExtension extends Extension {
                 this._connectFocusHandler();
             }
 
-            // Step 9: Show panel indicator if enabled
+            // Step 9: Show the panel indicator and Quick Settings tile if enabled
             if (this._showPanelIndicatorEnabled) {
                 this._showPanelIndicator();
+            }
+            if (this._settings.get_boolean('show-quick-settings')) {
+                this._showQuickSettings();
             }
 
             // Step 10: Connect GSettings change handlers for runtime updates
@@ -194,6 +206,16 @@ export default class TouchpadSpeedControlExtension extends Extension {
                         this._showPanelIndicator();
                     } else {
                         this._hidePanelIndicator();
+                    }
+                })
+            );
+
+            this._settingsChangedHandlers.push(
+                this._settings.connect('changed::show-quick-settings', () => {
+                    if (this._settings.get_boolean('show-quick-settings')) {
+                        this._showQuickSettings();
+                    } else {
+                        this._hideQuickSettings();
                     }
                 })
             );
@@ -251,6 +273,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         this._disconnectFocusHandler();
         this._disconnectWindowChangeHandlers();
         this._hidePanelIndicator();
+        this._hideQuickSettings();
 
         if (this._settings && this._settingsChangedHandlers) {
             for (const id of this._settingsChangedHandlers) {
@@ -469,20 +492,44 @@ export default class TouchpadSpeedControlExtension extends Extension {
         });
         this._panelButton.add_child(this._panelLabel);
 
-        this._referenceItem = new PopupMenu.PopupMenuItem('');
-        this._referenceItem.connect('activate', () => this._calibrate(true));
-        this._matchItem = new PopupMenu.PopupMenuItem('');
-        this._matchItem.connect('activate', () => this._calibrate(false));
-        this._horizontalItem = new PopupMenu.PopupMenuItem('');
-        this._horizontalItem.connect('activate', () => this._calibrateHorizontal());
-        this._panelButton.menu.addMenuItem(this._referenceItem);
-        this._panelButton.menu.addMenuItem(this._matchItem);
-        this._panelButton.menu.addMenuItem(this._horizontalItem);
+        this._panelCalibrationItems = this._addCalibrationItems(this._panelButton.menu);
         this._menuOpenHandler = this._panelButton.menu.connect('open-state-changed', (menu, open) => {
             if (open) this._updateCalibrationItems();
         });
 
         Main.panel.addToStatusArea('touchpad-speed-indicator', this._panelButton, 1, 'right');
+    }
+
+    /**
+     * Adds the calibration actions for the focused app to a menu.
+     *
+     * @param {PopupMenu.PopupMenu} menu - The panel indicator's or Quick Settings tile's menu.
+     * @returns {{reference: PopupMenu.PopupMenuItem, match: PopupMenu.PopupMenuItem,
+     *   horizontal: PopupMenu.PopupMenuItem}} The items, for _removeCalibrationItems().
+     */
+    _addCalibrationItems(menu) {
+        const items = {
+            reference: new PopupMenu.PopupMenuItem(''),
+            match: new PopupMenu.PopupMenuItem(''),
+            horizontal: new PopupMenu.PopupMenuItem(''),
+        };
+        const handlers = [
+            [items.reference, items.reference.connect('activate', () => this._calibrate(true))],
+            [items.match, items.match.connect('activate', () => this._calibrate(false))],
+            [items.horizontal, items.horizontal.connect('activate', () => this._calibrateHorizontal())],
+        ];
+        for (const item of Object.values(items)) menu.addMenuItem(item);
+        this._calibrationItemSets.push(items);
+        this._calibrationHandlers.set(items, handlers);
+        return items;
+    }
+
+    _removeCalibrationItems(items) {
+        if (!items) return;
+        for (const [item, id] of this._calibrationHandlers.get(items) ?? []) item.disconnect(id);
+        this._calibrationHandlers.delete(items);
+        this._calibrationItemSets = this._calibrationItemSets.filter(set => set !== items);
+        for (const item of Object.values(items)) item.destroy();
     }
 
     /**
@@ -494,22 +541,172 @@ export default class TouchpadSpeedControlExtension extends Extension {
         const name = app ? app.get_name() : null;
         const reference = this._settings.get_string('scroll-reference');
         const referenceName = this._appName(reference);
-
-        this._referenceItem.label.text = name
-            ? `Use ${name} as scroll reference`
-            : 'Focus an app window to calibrate';
-        this._referenceItem.setSensitive(!!name && !this._calibrating);
-
         const canMatch = !!name && !!reference && app.get_id() !== reference;
-        this._matchItem.label.text = reference
-            ? `Match ${name ?? 'focused app'} to ${referenceName}`
-            : 'Set a scroll reference first';
-        this._matchItem.setSensitive(canMatch && !this._calibrating);
 
-        this._horizontalItem.label.text = name
-            ? `Measure horizontal scrolling of ${name}`
-            : 'Measure horizontal scrolling';
-        this._horizontalItem.setSensitive(!!name && !this._calibrating);
+        for (const items of this._calibrationItemSets) {
+            items.reference.label.text = name
+                ? `Use ${name} as scroll reference`
+                : 'Focus an app window to calibrate';
+            items.reference.setSensitive(!!name && !this._calibrating);
+
+            items.match.label.text = reference
+                ? `Match ${name ?? 'focused app'} to ${referenceName}`
+                : 'Set a scroll reference first';
+            items.match.setSensitive(canMatch && !this._calibrating);
+
+            items.horizontal.label.text = name
+                ? `Measure horizontal scrolling of ${name}`
+                : 'Measure horizontal scrolling';
+            items.horizontal.setSensitive(!!name && !this._calibrating);
+        }
+    }
+
+    /**
+     * Shows the Quick Settings tile (issue #6): the applied speeds as its
+     * subtitle; clicking it opens the preferences, and its menu has − / +
+     * for the focused app on each axis plus the calibration actions.
+     */
+    _showQuickSettings() {
+        if (this._quickIndicator) return;
+        this._quickToggle = new QuickSettings.QuickMenuToggle({
+            // Short enough not to be cut off in a half-width tile
+            title: 'Touchpad',
+            iconName: 'input-touchpad-symbolic',
+            toggleMode: false,
+        });
+        this._quickClickedHandler = this._quickToggle.connect('clicked', () => {
+            Main.panel.closeQuickSettings?.();
+            this.openPreferences();
+        });
+
+        const menu = this._quickToggle.menu;
+        menu.setHeader('input-touchpad-symbolic', 'Touchpad Speed');
+        this._quickFactorItems = [this._createFactorItem('v'), this._createFactorItem('h')];
+        for (const item of this._quickFactorItems) menu.addMenuItem(item);
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._quickCalibrationItems = this._addCalibrationItems(menu);
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._quickSettingsItem = new PopupMenu.PopupMenuItem('Touchpad Speed Settings');
+        this._quickSettingsItem.connect('activate', () => {
+            Main.panel.closeQuickSettings?.();
+            this.openPreferences();
+        });
+        menu.addMenuItem(this._quickSettingsItem);
+        this._quickMenuOpenHandler = menu.connect('open-state-changed', (m, open) => {
+            if (!open) return;
+            this._updateCalibrationItems();
+            this._updateFactorItems();
+        });
+
+        this._quickIndicator = new QuickSettings.SystemIndicator();
+        this._quickIndicator.quickSettingsItems.push(this._quickToggle);
+        Main.panel.statusArea.quickSettings.addExternalIndicator(this._quickIndicator);
+        this._updateQuickSubtitle();
+    }
+
+    _hideQuickSettings() {
+        if (!this._quickIndicator) return;
+        if (this._quickMenuOpenHandler) {
+            this._quickToggle.menu.disconnect(this._quickMenuOpenHandler);
+            this._quickMenuOpenHandler = null;
+        }
+        if (this._quickClickedHandler) {
+            this._quickToggle.disconnect(this._quickClickedHandler);
+            this._quickClickedHandler = null;
+        }
+        this._removeCalibrationItems(this._quickCalibrationItems);
+        this._quickCalibrationItems = null;
+        for (const item of this._quickFactorItems) item.destroy();
+        this._quickFactorItems = null;
+        this._quickSettingsItem.destroy();
+        this._quickSettingsItem = null;
+        this._quickToggle.destroy();
+        this._quickToggle = null;
+        this._quickIndicator.destroy();
+        this._quickIndicator = null;
+    }
+
+    /**
+     * A menu row with the focused app's factor on one axis and − / + buttons.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @returns {PopupMenu.PopupBaseMenuItem} The row.
+     */
+    _createFactorItem(axis) {
+        // Reactive (so it is not drawn dimmed) but not activatable: clicking
+        // the row itself does nothing and keeps the menu open
+        const item = new PopupMenu.PopupBaseMenuItem({activate: false, hover: false, can_focus: false});
+        item.add_child(new St.Label({
+            text: axis === 'v' ? 'Vertical' : 'Horizontal',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        item._valueLabel = new St.Label({
+            y_align: Clutter.ActorAlign.CENTER,
+            style: 'min-width: 3em; text-align: right; margin-right: 6px;',
+        });
+        item.add_child(item._valueLabel);
+        item._buttons = [[-FACTOR_STEP, 'list-remove-symbolic', 'Slower'], [FACTOR_STEP, 'list-add-symbolic', 'Faster']]
+            .map(([step, icon, name]) => {
+                const button = new St.Button({
+                    icon_name: icon,
+                    style_class: 'icon-button',
+                    can_focus: true,
+                    accessible_name: `${name} (${axis === 'v' ? 'vertical' : 'horizontal'})`,
+                });
+                button.connect('clicked', () => this._stepFocusedAppFactor(axis, step));
+                item.add_child(button);
+                return button;
+            });
+        item._axis = axis;
+        return item;
+    }
+
+    /**
+     * Shows the focused app's factors in the Quick Settings rows.
+     */
+    _updateFactorItems() {
+        if (!this._quickFactorItems) return;
+        const app = this._calibrationApp();
+        this._quickToggle.menu.setHeader('input-touchpad-symbolic', 'Touchpad Speed',
+            app ? app.get_name() : 'No app window focused');
+        for (const item of this._quickFactorItems) {
+            item._valueLabel.text = app ? this._resolveFactor(item._axis, app.get_id()).toFixed(2) : '—';
+            for (const button of item._buttons) button.reactive = !!app;
+        }
+    }
+
+    /**
+     * Changes the focused app's factor on one axis by `step`, like the
+     * preferences' − / + buttons. A hand-set factor stops the app following
+     * the scroll reference.
+     *
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
+     * @param {number} step - Amount to add (negative to slow down).
+     */
+    _stepFocusedAppFactor(axis, step) {
+        const app = this._calibrationApp();
+        if (!app || !this._settings) return;
+        const appId = app.get_id();
+        const factor = Math.round(Math.min(FACTOR_MAX,
+            Math.max(FACTOR_MIN, this._resolveFactor(axis, appId) + step)) * 100) / 100;
+
+        const matched = this._settings.get_strv('matched-apps');
+        if (matched.includes(appId))
+            this._settings.set_strv('matched-apps', matched.filter(id => id !== appId));
+
+        const key = axis === 'v' ? 'app-factors' : 'h-app-factors';
+        const factors = this._settings.get_value(key).deep_unpack();
+        factors[normalizeAppId(appId)] = factor;
+        this._settings.set_value(key, new GLib.Variant('a{sd}', factors));
+        this._updateFactorItems();
+    }
+
+    _updateQuickSubtitle() {
+        if (this._quickToggle && this._lastAppliedVFactor !== null && this._lastAppliedVFactor !== undefined) {
+            this._quickToggle.subtitle =
+                `V ${this._lastAppliedVFactor.toFixed(2)} · H ${this._lastAppliedHFactor.toFixed(2)}`;
+        }
     }
 
     // The focused window's app, if it has a real application ID
@@ -542,6 +739,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
         this._calibrating = true;
         this._panelButton?.menu.close();
+        Main.panel.closeQuickSettings?.();
         try {
             // Let the menu close and give up its grab before scrolling
             await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
@@ -596,18 +794,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._panelButton.menu.disconnect(this._menuOpenHandler);
             this._menuOpenHandler = null;
         }
-        if (this._referenceItem) {
-            this._referenceItem.destroy();
-            this._referenceItem = null;
-        }
-        if (this._matchItem) {
-            this._matchItem.destroy();
-            this._matchItem = null;
-        }
-        if (this._horizontalItem) {
-            this._horizontalItem.destroy();
-            this._horizontalItem = null;
-        }
+        this._removeCalibrationItems(this._panelCalibrationItems);
+        this._panelCalibrationItems = null;
         if (this._panelLabel) {
             this._panelLabel.destroy();
             this._panelLabel = null;
@@ -694,6 +882,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
         this._calibrating = true;
         this._panelButton?.menu.close();
+        Main.panel.closeQuickSettings?.();
         try {
             // Let the menu close and give up its grab before scrolling
             await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
@@ -878,6 +1067,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         }
         this._lastAppliedVFactor = vFactor;
         this._lastAppliedHFactor = hFactor;
+        this._updateQuickSubtitle();
         this._applyFactors(vFactor, hFactor);
     }
 
