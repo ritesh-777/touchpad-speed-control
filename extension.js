@@ -27,7 +27,7 @@ import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js'
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import { measureWindowGain } from './calibration.js';
+import { cancelCalibration, measureWindowGain, resetCalibration, wait } from './calibration.js';
 import { applyMatchedFactors, horizontalMatchingGains, normalizeAppId, resolveFactor } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
 
@@ -89,6 +89,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         });
 
         log('===== ENABLE CALLED =====');
+        resetCalibration();
 
         // Step 1: Verify WSF binary exists
         this._wsfPath = findWSFPath();
@@ -259,6 +260,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
      */
     disable() {
         log('===== DISABLE CALLED =====');
+        // Stop a calibration in progress and remove its timeouts
+        cancelCalibration();
 
         if (this._wsfCheckCancellable) {
             this._wsfCheckCancellable.cancel();
@@ -281,6 +284,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
             }
         }
         this._settingsChangedHandlers = null;
+        this._calibrationItemSets = null;
+        this._calibrationHandlers = null;
 
         this._windowUnderCursor = null;
         this._lastAppliedVFactor = null;
@@ -742,15 +747,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
         Main.panel.closeQuickSettings?.();
         try {
             // Let the menu close and give up its grab before scrolling
-            await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
-                resolve();
-                return GLib.SOURCE_REMOVE;
-            }));
-            // With debug logging on, keep the captures of failed steps for diagnosis
-            const saveDir = debugLogging
-                ? GLib.build_filenamev([GLib.get_user_cache_dir(), 'touchpad-speed-control', 'calibration', appId])
-                : null;
-            const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line), saveDir);
+            await wait(300);
+            const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line));
             if (!this._settings) return;
 
             const gains = this._settings.get_value('scroll-gains').deep_unpack();
@@ -782,6 +780,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
                 `Factors set to ${this._resolveFactor('v', appId).toFixed(2)} (vertical) and ` +
                 `${this._resolveFactor('h', appId).toFixed(2)} (horizontal); they follow the reference from now on.`);
         } catch (e) {
+            // Disabled meanwhile (screen locked, extension turned off): stay quiet
+            if (!this._settings) return;
             logError('Calibration failed for ' + appId + ': ' + e.message);
             this._showNotification('Calibration failed', `${name}: ${e.message}`);
         } finally {
@@ -885,14 +885,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
         Main.panel.closeQuickSettings?.();
         try {
             // Let the menu close and give up its grab before scrolling
-            await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
-                resolve();
-                return GLib.SOURCE_REMOVE;
-            }));
-            const saveDir = debugLogging
-                ? GLib.build_filenamev([GLib.get_user_cache_dir(), 'touchpad-speed-control', 'calibration', appId])
-                : null;
-            const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line), saveDir, false);
+            await wait(300);
+            const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line), false);
             if (!this._settings) return;
 
             const gains = this._settings.get_value('scroll-gains').deep_unpack();
@@ -923,6 +917,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._showNotification('Horizontal scrolling measured',
                 `${name} scrolls ${result.gain.toFixed(2)} px per unit sideways.${axisNote} ${detail}`);
         } catch (e) {
+            if (!this._settings) return;
             logError('Horizontal calibration failed for ' + appId + ': ' + e.message);
             this._showNotification('Calibration failed', `${name}: ${e.message}`);
         } finally {
