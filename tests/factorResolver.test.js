@@ -1,6 +1,6 @@
 // Unit tests for factorResolver.js. Run with: gjs -m tests/factorResolver.test.js
 
-import {applyMatchedFactors, factorForGain, isPattern, matchesPattern, normalizeAppId, resolveFactor, validatePattern} from '../factorResolver.js';
+import {applyMatchedFactors, factorForGain, horizontalMatchingGains, isPattern, matchesPattern, normalizeAppId, resolveFactor, validatePattern} from '../factorResolver.js';
 
 let failures = 0;
 let count = 0;
@@ -105,6 +105,19 @@ check('rules and other apps are left alone',
 const input = {'zotero': 1.0};
 applyMatchedFactors(input, 0.45, gains, ['zotero.desktop'], ref);
 check('input dictionary is not modified', input, {'zotero': 1.0});
+
+// horizontalMatchingGains
+const hRef = 'org.gnome.TextEditor.desktop';
+const vGains = {[hRef]: 2.0, 'google-chrome.desktop': 13.0, 'zotero.desktop': 4.0};
+check('no horizontal reference: vertical gains unchanged',
+    horizontalMatchingGains(vGains, {'google-chrome.desktop': 20.0}, hRef), vGains);
+const hGains = horizontalMatchingGains(vGains, {[hRef]: 4.0, 'google-chrome.desktop': 20.0}, hRef);
+check('horizontal ratio is used when both are measured (5x reference -> 10 on its 2.0 scale)',
+    hGains['google-chrome.desktop'], 10.0);
+check('apps without a horizontal measurement keep the vertical gain', hGains['zotero.desktop'], 4.0);
+check('reference keeps its vertical gain', hGains[hRef], 2.0);
+check('horizontal ratio drives the horizontal factor',
+    applyMatchedFactors({}, 0.5, hGains, ['google-chrome.desktop'], hRef), {'google-chrome': 0.1});
 
 print(`${count - failures}/${count} passed`);
 if (failures) imports.system.exit(1);

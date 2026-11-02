@@ -87,6 +87,11 @@
       <summary>Measured scroll gain per app</summary>
       <description>Logical pixels an app scrolls per unit of touchpad scroll, before any factor. Written by calibration.</description>
     </key>
+    <key name="h-scroll-gains" type="a{sd}">
+      <default>{}</default>
+      <summary>Measured horizontal scroll gain per app</summary>
+      <description>Like scroll-gains, for horizontal scrolling. Optional: apps without one use their vertical ratio to the reference for both axes.</description>
+    </key>
     <key name="scroll-reference" type="s">
       <default>''</default>
       <summary>App whose scrolling calibration matches other apps to</summary>

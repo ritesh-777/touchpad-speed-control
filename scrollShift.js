@@ -50,7 +50,39 @@ export function rowSignatures(pixels, width, height, rowstride, channels) {
 }
 
 /**
- * Averages groups of `factor` rows, e.g. to compare at logical resolution on
+ * Reduces an RGB(A) image to one luminance signature per column, for
+ * measuring horizontal scrolling with the same shift search.
+ *
+ * @param {Uint8Array} pixels - Image bytes.
+ * @param {number} width - Width in pixels.
+ * @param {number} height - Height in pixels.
+ * @param {number} rowstride - Bytes per row.
+ * @param {number} channels - Bytes per pixel (3 or 4).
+ * @returns {Float32Array[]} One signature of SAMPLES values per column.
+ */
+export function columnSignatures(pixels, width, height, rowstride, channels) {
+    const samples = Math.min(SAMPLES, height);
+    const band = height / samples;
+    const columns = [];
+    for (let x = 0; x < width; x++) {
+        const signature = new Float32Array(samples);
+        for (let s = 0; s < samples; s++) {
+            const from = Math.floor(s * band);
+            const to = Math.max(from + 1, Math.floor((s + 1) * band));
+            let sum = 0;
+            for (let y = from; y < to; y++) {
+                const i = y * rowstride + x * channels;
+                sum += 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+            }
+            signature[s] = sum / (to - from);
+        }
+        columns.push(signature);
+    }
+    return columns;
+}
+
+/**
+ * Averages groups of `factor` rows (or columns), e.g. to compare at logical resolution on
  * a scaled display. Re-rendered text then differs less between captures.
  *
  * @param {Float32Array[]} rows - Row signatures.

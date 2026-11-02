@@ -26,7 +26,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import { measureWindowGain } from './calibration.js';
-import { applyMatchedFactors, resolveFactor } from './factorResolver.js';
+import { applyMatchedFactors, horizontalMatchingGains, resolveFactor } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
 
 // Verbose logging, controlled by the debug-logging setting (General tab)
@@ -208,7 +208,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
             // Re-apply immediately when factors are edited in preferences, keeping
             // calibrated apps matched to the reference first
             for (const key of ['app-factors', 'h-app-factors', 'global-factor', 'h-global-factor',
-                'scroll-gains', 'scroll-reference', 'matched-apps']) {
+                'scroll-gains', 'h-scroll-gains', 'scroll-reference', 'matched-apps']) {
                 this._settingsChangedHandlers.push(
                     this._settings.connect('changed::' + key, () => {
                         this._syncMatchedApps();
@@ -473,8 +473,11 @@ export default class TouchpadSpeedControlExtension extends Extension {
         this._referenceItem.connect('activate', () => this._calibrate(true));
         this._matchItem = new PopupMenu.PopupMenuItem('');
         this._matchItem.connect('activate', () => this._calibrate(false));
+        this._horizontalItem = new PopupMenu.PopupMenuItem('');
+        this._horizontalItem.connect('activate', () => this._calibrateHorizontal());
         this._panelButton.menu.addMenuItem(this._referenceItem);
         this._panelButton.menu.addMenuItem(this._matchItem);
+        this._panelButton.menu.addMenuItem(this._horizontalItem);
         this._menuOpenHandler = this._panelButton.menu.connect('open-state-changed', (menu, open) => {
             if (open) this._updateCalibrationItems();
         });
@@ -502,6 +505,11 @@ export default class TouchpadSpeedControlExtension extends Extension {
             ? `Match ${name ?? 'focused app'} to ${referenceName}`
             : 'Set a scroll reference first';
         this._matchItem.setSensitive(canMatch && !this._calibrating);
+
+        this._horizontalItem.label.text = name
+            ? `Measure horizontal scrolling of ${name}`
+            : 'Measure horizontal scrolling';
+        this._horizontalItem.setSensitive(!!name && !this._calibrating);
     }
 
     // The focused window's app, if it has a real application ID
@@ -596,6 +604,10 @@ export default class TouchpadSpeedControlExtension extends Extension {
             this._matchItem.destroy();
             this._matchItem = null;
         }
+        if (this._horizontalItem) {
+            this._horizontalItem.destroy();
+            this._horizontalItem = null;
+        }
         if (this._panelLabel) {
             this._panelLabel.destroy();
             this._panelLabel = null;
@@ -669,6 +681,62 @@ export default class TouchpadSpeedControlExtension extends Extension {
     }
 
     /**
+     * Measures the focused app's horizontal scroll gain. Optional: a matched
+     * app measured horizontally (with a reference measured horizontally too)
+     * gets its horizontal factor from the horizontal ratio instead of the
+     * vertical one.
+     */
+    async _calibrateHorizontal() {
+        const app = this._calibrationApp();
+        const window = global.display.focus_window;
+        if (!app || this._calibrating) return;
+        const appId = app.get_id();
+        const name = app.get_name();
+
+        this._calibrating = true;
+        this._panelButton?.menu.close();
+        try {
+            // Let the menu close and give up its grab before scrolling
+            await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+                resolve();
+                return GLib.SOURCE_REMOVE;
+            }));
+            const saveDir = debugLogging
+                ? GLib.build_filenamev([GLib.get_user_cache_dir(), 'touchpad-speed-control', 'calibration', appId])
+                : null;
+            const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line), saveDir, false);
+            if (!this._settings) return;
+
+            const hGains = this._settings.get_value('h-scroll-gains').deep_unpack();
+            hGains[appId] = result.gain;
+            this._settings.set_value('h-scroll-gains', new GLib.Variant('a{sd}', hGains));
+            log('Calibrate ' + appId + ': horizontal gain ' + result.gain.toFixed(3));
+
+            const gains = this._settings.get_value('scroll-gains').deep_unpack();
+            const reference = this._settings.get_string('scroll-reference');
+            let detail;
+            if (appId === reference) {
+                detail = 'Matched apps measured horizontally now use their horizontal ratio.';
+            } else if (!hGains[reference]) {
+                detail = `Measure ${this._appName(reference) || 'the reference app'} horizontally too to use it.`;
+            } else {
+                detail = `${(result.gain / hGains[reference]).toFixed(2)}× as far as ${this._appName(reference)}.`;
+                if (this._settings.get_strv('matched-apps').includes(appId))
+                    detail += ` Horizontal factor set to ${this._resolveFactor('h', appId).toFixed(2)}.`;
+                else if (!gains[appId])
+                    detail += ' Match it (vertically) to make it follow the reference.';
+            }
+            this._showNotification('Horizontal scrolling measured',
+                `${name} scrolls ${result.gain.toFixed(2)} px per unit sideways. ${detail}`);
+        } catch (e) {
+            logError('Horizontal calibration failed for ' + appId + ': ' + e.message);
+            this._showNotification('Calibration failed', `${name}: ${e.message}`);
+        } finally {
+            this._calibrating = false;
+        }
+    }
+
+    /**
      * Recalculates the factors of matched apps from their measured gains, so
      * they keep scrolling like the reference app when its factor (or the
      * global factor it falls back to) changes. Writes only when something
@@ -681,11 +749,18 @@ export default class TouchpadSpeedControlExtension extends Extension {
         const reference = this._settings.get_string('scroll-reference');
         if (!matched.length) return;
 
-        for (const [factorsKey, globalKey] of [['app-factors', 'global-factor'], ['h-app-factors', 'h-global-factor']]) {
+        // Horizontal uses horizontal measurements where both the app and the
+        // reference have one, and the vertical ratio otherwise
+        const hGains = horizontalMatchingGains(
+            gains, this._settings.get_value('h-scroll-gains').deep_unpack(), reference);
+        for (const [factorsKey, globalKey, axisGains] of [
+            ['app-factors', 'global-factor', gains],
+            ['h-app-factors', 'h-global-factor', hGains],
+        ]) {
             const updated = applyMatchedFactors(
                 this._settings.get_value(factorsKey).deep_unpack(),
                 this._settings.get_double(globalKey),
-                gains, matched, reference);
+                axisGains, matched, reference);
             if (updated) {
                 log('Matched apps updated (' + factorsKey + ')');
                 this._settings.set_value(factorsKey, new GLib.Variant('a{sd}', updated));

@@ -23,7 +23,7 @@ import GdkPixbuf from 'gi://GdkPixbuf';
 import Clutter from 'gi://Clutter';
 import Shell from 'gi://Shell';
 
-import { downsampleRows, estimateShift, rowSignatures } from './scrollShift.js';
+import { columnSignatures, downsampleRows, estimateShift, rowSignatures } from './scrollShift.js';
 
 // Scroll sent per event and the pause between events. Slow enough that
 // apps add little or no kinetic scrolling after the finish event.
@@ -51,13 +51,15 @@ function _nowUs() {
 }
 
 /**
- * Captures a screen area and returns its row signatures, averaged down to
- * roughly logical resolution on scaled displays.
+ * Captures a screen area and returns its row signatures (or column
+ * signatures, for horizontal scrolling), averaged down to roughly logical
+ * resolution on scaled displays.
  *
  * @returns {Promise<{rows: Float32Array[], scale: number, png: GLib.Bytes}>}
- *   Signatures per row, rows per logical pixel, and the captured PNG.
+ *   Signatures per row (or column), captured pixels per logical pixel after
+ *   averaging, and the captured PNG.
  */
-async function _captureRows(x, y, width, height) {
+async function _captureRows(x, y, width, height, vertical) {
     const shooter = new Shell.Screenshot();
     const stream = Gio.MemoryOutputStream.new_resizable();
     await shooter.screenshot_area(x, y, width, height, stream);
@@ -66,7 +68,7 @@ async function _captureRows(x, y, width, height) {
     const png = stream.steal_as_bytes();
     const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(
         Gio.MemoryInputStream.new_from_bytes(png), null);
-    const rows = rowSignatures(
+    const rows = (vertical ? rowSignatures : columnSignatures)(
         pixbuf.read_pixel_bytes().toArray(),
         pixbuf.get_width(),
         pixbuf.get_height(),
@@ -110,19 +112,20 @@ async function _scroll(device, units, vertical) {
 }
 
 // Scrolls `units` and returns how far the content in the area moved, in
-// logical px (positive = moved up), or null if no shift matched clearly.
-// With `saveDir`, the captures of a step without a clear match are saved there.
-async function _measureShift(device, area, units, saveDir, label) {
-    const before = await _captureRows(area.x, area.y, area.width, area.height);
-    await _scroll(device, units, true);
+// logical px (positive = moved up, or left), or null if no shift matched
+// clearly. With `saveDir`, the captures of a step without a clear match are
+// saved there.
+async function _measureShift(device, area, units, vertical, saveDir, label) {
+    const before = await _captureRows(area.x, area.y, area.width, area.height, vertical);
+    await _scroll(device, units, vertical);
     await _sleep(SETTLE_MS);
-    const after = await _captureRows(area.x, area.y, area.width, area.height);
+    const after = await _captureRows(area.x, area.y, area.width, area.height, vertical);
     const result = estimateShift(before.rows, after.rows);
     if (!result && saveDir) _saveCaptures(saveDir, label, before, after);
     return result ? result.shift / before.scale : null;
 }
 
-// One measurement in one direction (1 = down, -1 = up): finds a scroll
+// One measurement in one direction (1 = down or right, -1 = up or left): finds a scroll
 // amount that moves the content measurably, then confirms with twice that.
 // Returns the gain, or throws with the reason it could not measure.
 async function _measureDirection(measure, direction) {
@@ -142,11 +145,11 @@ async function _measureDirection(measure, direction) {
         shift = null;
     }
     if (shift === null)
-        throw new Error('the content did not scroll measurably; open a long page or document and try again');
+        throw new Error('the content did not scroll measurably');
 
     const confirm = await measure(direction * 2 * units);
     if (confirm === null || Math.abs(confirm / (2 * shift) - 1) > MAX_MISMATCH)
-        throw new Error('the measurements disagree; try a page with varied content, away from its ends');
+        throw new Error('the measurements disagree');
 
     return {
         gain: (shift + confirm) / (direction * 3 * units),
@@ -156,34 +159,44 @@ async function _measureDirection(measure, direction) {
 }
 
 /**
- * Measures a window's vertical scroll gain.
+ * Measures a window's scroll gain on one axis.
  *
  * Finds a scroll amount that moves the content measurably, then repeats
  * with twice that amount: content that scrolls linearly moves twice as far,
  * so a mismatch means the measurement is unreliable (repetitive content,
- * an animation, a page that hit its end). Measures scrolling down first and,
- * if that fails (a chat sitting at its bottom, for example), scrolling up.
- * The pointer is moved to the window for the measurement and put back
- * afterwards, and the content is scrolled back to where it was.
+ * an animation, a page that hit its end). Measures scrolling down (or right)
+ * first and, if that fails (a chat sitting at its bottom, for example), up
+ * (or left). The pointer is moved to the window for the measurement and put
+ * back afterwards, and the content is scrolled back to where it was.
  *
- * @param {Meta.Window} window - The window to measure; it needs scrollable
- *   content under its centre, at least a screen long.
+ * @param {Meta.Window} window - The window to measure; it needs content
+ *   under its centre that scrolls on that axis, at least a screen long (or
+ *   wide).
  * @param {function(string)} [log] - Receives a line per measurement step.
  * @param {string} [saveDir] - Where to save the captures of steps that found
  *   no clear match, for diagnosis. Nothing is saved without it.
+ * @param {boolean} [vertical] - Measure vertical (default) or horizontal scrolling.
  * @returns {Promise<{gain: number, shifts: number[], units: number[]}>}
  * @throws {Error} If no reliable gain could be measured in either direction.
  */
-export async function measureWindowGain(window, log = () => {}, saveDir = null) {
+export async function measureWindowGain(window, log = () => {}, saveDir = null, vertical = true) {
     const rect = window.get_frame_rect();
-    // A central strip, skipping the header bar / toolbars at the top
-    const width = Math.min(STRIP_WIDTH_PX, rect.width);
-    const area = {
-        x: rect.x + Math.round((rect.width - width) / 2),
-        y: rect.y + Math.round(rect.height * 0.2),
-        width,
-        height: Math.round(rect.height * 0.7),
-    };
+    // A central strip: across the window for vertical scrolling (skipping
+    // the header bar / toolbars at the top), along it for horizontal
+    const area = vertical
+        ? {
+            x: rect.x + Math.round((rect.width - Math.min(STRIP_WIDTH_PX, rect.width)) / 2),
+            y: rect.y + Math.round(rect.height * 0.2),
+            width: Math.min(STRIP_WIDTH_PX, rect.width),
+            height: Math.round(rect.height * 0.7),
+        }
+        : {
+            x: rect.x + Math.round(rect.width * 0.15),
+            y: rect.y + Math.round(rect.height * 0.55 - Math.min(STRIP_WIDTH_PX, rect.height) / 2),
+            width: Math.round(rect.width * 0.7),
+            height: Math.min(STRIP_WIDTH_PX, rect.height),
+        };
+    const [forward, backward] = vertical ? ['down', 'up'] : ['right', 'left'];
 
     // GNOME 46+ reach the backend through the stage context
     const backend = global.stage.context?.get_backend() ?? Clutter.get_default_backend();
@@ -195,26 +208,34 @@ export async function measureWindowGain(window, log = () => {}, saveDir = null) 
     let step = 0;
     const measure = async units => {
         step++;
-        const shift = await _measureShift(device, area, units, saveDir, `step${step}-${units}units`);
+        const label = `${vertical ? 'v' : 'h'}-step${step}-${units}units`;
+        const shift = await _measureShift(device, area, units, vertical, saveDir, label);
         // A step that clearly did not move (content at its end) needs no undo
         if (shift === null || Math.abs(shift) >= 0.5) scrolled += units;
-        log(`scrolled ${units} units: content moved ${shift === null ? 'no clear match' : shift.toFixed(1) + ' px'}`);
+        log(`scrolled ${units} units ${vertical ? 'vertically' : 'horizontally'}: ` +
+            `content moved ${shift === null ? 'no clear match' : shift.toFixed(1) + ' px'}`);
         return shift;
     };
 
     try {
-        device.notify_absolute_motion(_nowUs(), area.x + width / 2, area.y + area.height / 2);
+        device.notify_absolute_motion(_nowUs(), area.x + area.width / 2, area.y + area.height / 2);
         await _sleep(100);
 
         try {
             return await _measureDirection(measure, 1);
         } catch (e) {
-            log(`scrolling down failed (${e.message}); trying up`);
-            return await _measureDirection(measure, -1);
+            log(`scrolling ${forward} failed (${e.message}); trying ${backward}`);
+            try {
+                return await _measureDirection(measure, -1);
+            } catch (e2) {
+                throw new Error(vertical
+                    ? `${e2.message}; open a long page or document, scroll to its middle and try again`
+                    : `${e2.message}; open something that scrolls sideways (a wide table, long lines, a zoomed image) and try again`);
+            }
         }
     } finally {
         if (scrolled)
-            await _scroll(device, -scrolled, true);
+            await _scroll(device, -scrolled, vertical);
         device.notify_absolute_motion(_nowUs(), pointerX, pointerY);
     }
 }

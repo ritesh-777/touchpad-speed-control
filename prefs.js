@@ -20,7 +20,7 @@ import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import { applyMatchedFactors, isPattern, normalizeAppId, resolveFactor, validatePattern } from './factorResolver.js';
+import { applyMatchedFactors, horizontalMatchingGains, isPattern, normalizeAppId, resolveFactor, validatePattern } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
 
 /**
@@ -1131,7 +1131,7 @@ class Settings {
         for (const appId of Object.keys(factors)) {
             factors[appId] = factor;
         }
-        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, factor));
+        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, factor, axis));
         this.schema.set_value(factorsKey, variant);
 
         this.renderAppList(axis);
@@ -1183,15 +1183,20 @@ class Settings {
      *
      * @param {Object<string, number>} factors - The new app factors.
      * @param {number} globalFactor - The new global factor.
+     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
      * @returns {Object<string, number>} The factors with matched apps updated.
      */
-    _withMatchedFactors(factors, globalFactor) {
+    _withMatchedFactors(factors, globalFactor, axis) {
+        const reference = this.schema.get_string('scroll-reference');
+        let gains = this.schema.get_value('scroll-gains').deep_unpack();
+        if (axis === 'h')
+            gains = horizontalMatchingGains(gains, this.schema.get_value('h-scroll-gains').deep_unpack(), reference);
         return applyMatchedFactors(
             factors,
             globalFactor,
-            this.schema.get_value('scroll-gains').deep_unpack(),
+            gains,
             this.schema.get_strv('matched-apps'),
-            this.schema.get_string('scroll-reference')) ?? factors;
+            reference) ?? factors;
     }
 
     _appName(appId) {
@@ -1219,7 +1224,9 @@ class Settings {
             title: _('Calibration'),
             description: _('Match apps to one reference app so a swipe scrolls the same distance everywhere. ' +
                 'To measure an app, turn on the panel indicator (below), open a long page in the app, click into it, ' +
-                'and choose "Use … as scroll reference" or "Match …" from the indicator\'s menu.')
+                'and choose "Use … as scroll reference" or "Match …" from the indicator\'s menu. ' +
+                'For horizontal scrolling, also choose "Measure horizontal scrolling" on something that scrolls sideways; ' +
+                'apps without it use their vertical ratio for both axes.')
         });
         const clearButton = new Gtk.Button({
             label: _('Clear'),
@@ -1230,13 +1237,14 @@ class Settings {
         clearButton.connect('clicked', () => {
             this.schema.set_strv('matched-apps', []);
             this.schema.set_string('scroll-reference', '');
+            this.schema.set_value('h-scroll-gains', new GLib.Variant('a{sd}', {}));
             this.schema.set_value('scroll-gains', new GLib.Variant('a{sd}', {}));
         });
         this._calibrationGroup.set_header_suffix(clearButton);
         this._calibrationClearButton = clearButton;
         this._calibrationRows = [];
 
-        this._calibrationSignals = ['scroll-gains', 'scroll-reference', 'matched-apps'].map(key =>
+        this._calibrationSignals = ['scroll-gains', 'h-scroll-gains', 'scroll-reference', 'matched-apps'].map(key =>
             this.schema.connect('changed::' + key, () => this._renderCalibrationRows()));
         this._renderCalibrationRows();
         return this._calibrationGroup;
@@ -1247,12 +1255,13 @@ class Settings {
         this._calibrationRows = [];
 
         const gains = this.schema.get_value('scroll-gains').deep_unpack();
+        const hGains = this.schema.get_value('h-scroll-gains').deep_unpack();
         const reference = this.schema.get_string('scroll-reference');
         const matched = this.schema.get_strv('matched-apps');
         const referenceGain = gains[reference];
-        this._calibrationClearButton.sensitive = Object.keys(gains).length > 0;
+        this._calibrationClearButton.sensitive = Object.keys(gains).length + Object.keys(hGains).length > 0;
 
-        const ids = Object.keys(gains).sort((a, b) =>
+        const ids = [...new Set([...Object.keys(gains), ...Object.keys(hGains)])].sort((a, b) =>
             (b === reference) - (a === reference) || this._appName(a).localeCompare(this._appName(b)));
         if (!ids.length) {
             const row = new Adw.ActionRow({
@@ -1266,11 +1275,19 @@ class Settings {
 
         for (const id of ids) {
             const row = new Adw.ActionRow({ title: this._appName(id) });
-            if (id === reference) {
-                row.subtitle = _('Reference · %s px per unit').replace('%s', gains[id].toFixed(2));
+            const horizontal = hGains[id]
+                ? (id !== reference && hGains[reference]
+                    ? _(' · sideways %s× the reference').replace('%s', (hGains[id] / hGains[reference]).toFixed(2))
+                    : _(' · sideways %s px per unit').replace('%s', hGains[id].toFixed(2)))
+                : '';
+            if (!gains[id]) {
+                // Measured sideways only: it needs a vertical measurement to follow
+                row.subtitle = _('Not measured vertically') + horizontal;
+            } else if (id === reference) {
+                row.subtitle = _('Reference · %s px per unit').replace('%s', gains[id].toFixed(2)) + horizontal;
             } else {
                 const ratio = referenceGain ? _('%s× the reference · ').replace('%s', (gains[id] / referenceGain).toFixed(2)) : '';
-                row.subtitle = ratio + _('%s px per unit').replace('%s', gains[id].toFixed(2));
+                row.subtitle = ratio + _('%s px per unit').replace('%s', gains[id].toFixed(2)) + horizontal;
 
                 const referenceButton = new Gtk.Button({
                     icon_name: 'starred-symbolic',
@@ -1306,9 +1323,12 @@ class Settings {
             });
             forget.connect('clicked', () => {
                 const updated = this.schema.get_value('scroll-gains').deep_unpack();
+                const hUpdated = this.schema.get_value('h-scroll-gains').deep_unpack();
                 delete updated[id];
+                delete hUpdated[id];
                 this.schema.set_strv('matched-apps', this.schema.get_strv('matched-apps').filter(m => m !== id));
                 if (this.schema.get_string('scroll-reference') === id) this.schema.set_string('scroll-reference', '');
+                this.schema.set_value('h-scroll-gains', new GLib.Variant('a{sd}', hUpdated));
                 this.schema.set_value('scroll-gains', new GLib.Variant('a{sd}', updated));
             });
             row.add_suffix(forget);
@@ -1473,7 +1493,7 @@ class Settings {
         for (const appId of Object.keys(factors)) {
             factors[appId] = 1.0;
         }
-        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, 1.0));
+        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, 1.0, 'v'));
         this.schema.set_value('app-factors', variant);
 
         this.renderAppList('v');
@@ -1506,7 +1526,7 @@ class Settings {
         for (const appId of Object.keys(factors)) {
             factors[appId] = 1.0;
         }
-        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, 1.0));
+        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, 1.0, 'h'));
         this.schema.set_value('h-app-factors', variant);
 
         this.renderAppList('h');

@@ -115,7 +115,7 @@ Apps scroll different distances for the same swipe: on a typical system Chrome a
 2. Open a long page or document in the app you want as the reference (for example Text Editor), scroll to the middle and click into it. From the indicator's menu, choose **Use … as scroll reference**. Keep your hands off the touchpad for a few seconds: the extension scrolls the page a little, measures how far it moved, and scrolls it back.
 3. Do the same in each other app, choosing **Match … to …** instead.
 
-Matched apps get the factor that makes a swipe move the same distance as in the reference, on both axes. They keep following it: change the reference app's speed or the global factor and every matched app is recalculated, so one slider sets the feel everywhere. Setting a matched app's speed by hand stops it following.
+Matched apps get the factor that makes a swipe move the same distance as in the reference, on both axes. Horizontal scrolling uses the same ratio unless you measure it too: open something that scrolls sideways (a wide table, long lines of code, a zoomed image) and choose **Measure horizontal scrolling of …** from the indicator's menu, in the reference app and in the matched app. Their horizontal ratio then sets the horizontal factor. They keep following it: change the reference app's speed or the global factor and every matched app is recalculated, so one slider sets the feel everywhere. Setting a matched app's speed by hand stops it following.
 
 Measurements run on your own machine, so your touchpad, display scaling and app versions are taken into account. Pick a page with plenty of text, away from its top and bottom; a chat that sits at its bottom is fine, since calibration then measures by scrolling up.
 

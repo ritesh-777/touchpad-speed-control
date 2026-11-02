@@ -1,6 +1,6 @@
 // Unit tests for scrollShift.js. Run with: gjs -m tests/scrollShift.test.js
 
-import {downsampleRows, estimateShift, rowSignatures} from '../scrollShift.js';
+import {columnSignatures, downsampleRows, estimateShift, rowSignatures} from '../scrollShift.js';
 
 let failures = 0;
 let count = 0;
@@ -78,6 +78,24 @@ const doubled = capture(100, 300).flatMap(row => [row, row]);
 const doubledAfter = capture(122, 300).flatMap(row => [row, row]);
 check('downsampling a 2x capture keeps the logical shift', estimateShift(downsampleRows(doubled, 2), downsampleRows(doubledAfter, 2)).shift, 22);
 check('downsample factor 1 is a no-op', downsampleRows(doubled, 1) === doubled, true);
+
+// Horizontal: the same document turned sideways (columns become lines)
+function captureSideways(offset, width, height = 120, channels = 4) {
+    const rowstride = width * channels;
+    const pixels = new Uint8Array(rowstride * height);
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const v = documentPixel(offset + x, y);
+            const i = y * rowstride + x * channels;
+            pixels[i] = pixels[i + 1] = pixels[i + 2] = v;
+        }
+    }
+    return columnSignatures(pixels, width, height, rowstride, channels);
+}
+const sideways = estimateShift(captureSideways(100, 300), captureSideways(143, 300));
+check('scrolled right 43 (column signatures)', sideways ? sideways.shift : null, 43);
+const sidewaysBack = estimateShift(captureSideways(200, 300), captureSideways(170, 300));
+check('scrolled left 30 (column signatures)', sidewaysBack ? sidewaysBack.shift : null, -30);
 
 const blank = rowSignatures(new Uint8Array(4 * 50 * 100).fill(255), 50, 100, 200, 4);
 check('blank content gives no result', estimateShift(blank, blank), null);
