@@ -1,1868 +1,569 @@
-// Touchpad Speed Control - Preferences UI
-// Author: Ritesh Seth
-// License: GPL v3
-// GitHub: https://github.com/ritesh-777/touchpad-speed-control
-//
-// This module provides the preferences UI for the Touchpad Speed Control extension.
-// It uses libadwaita (Adw) and GTK4 to create a modern GNOME settings interface.
-//
-// Architecture:
-//   - Three-page system: WSF missing → WSF inactive → Main tabbed UI
-//   - Three tabs: General, Vertical Scroll and Horizontal Scroll (Gtk.Stack + Gtk.StackSwitcher)
-//   - Each tab has: global factor slider, wildcard rules, per-app sliders, search, reset, and sync buttons
-//   - _suppressSave flag prevents cascading GSettings writes during programmatic updates
-//   - Direct-data rendering for sync operations bypasses GSettings cache staleness
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import Adw from 'gi://Adw';
-import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import Pango from 'gi://Pango';
-import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+import Gtk from 'gi://Gtk';
 
-import { applyMatchedFactors, calibrationFromJson, horizontalMatchingGains, isPattern, normalizeAppId, resolveFactor, validatePattern } from './factorResolver.js';
-import { findWSFPath, isWSFActive } from './wsf.js';
+import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-/**
- * TouchpadSpeedControlPreferences
- *
- * Entry point for the preferences dialog.
- *
- * On open, checks WSF status and displays one of three pages:
- *   1. _showMissingPage() — WSF binary not found, with installation instructions
- *   2. _showInactivePage() — WSF installed but preload not enabled
- *   3. _showMainUI() — WSF active, shows the full tabbed settings interface
- */
+import {applyMatchedFactors, calibrationFromJson, horizontalMatchingGains, isPattern, normalizeAppId, resolveFactor, validatePattern} from './factorResolver.js';
+import {findWSFPath, isWSFActive} from './wsf.js';
+
+const FACTOR_MIN = 0.05;
+const FACTOR_MAX = 2.0;
+const FACTOR_STEP = 0.01;
+const WSF_URL = 'https://github.com/daniel-g-carrasco/wayland-scroll-factor';
+
+// Listed first in the app lists: apps whose scrolling usually needs tuning
+const KNOWN_APPS = new Set([
+    'chrome', 'google-chrome-stable', 'google-chrome-unstable', 'google-chrome-beta', 'google-chrome-dev',
+    'com.google.Chrome', 'com.google.Chrome.unstable', 'firefox', 'firefox-developer', 'firefox-nightly',
+    'code', 'code-url-handler', 'org.gnome.Terminal', 'telegram-desktop', 'discord', 'slack',
+    'org.gnome.Nautilus', 'org.gnome.TextEditor', 'org.gnome.gedit', 'okular', 'org.gnome.Evince',
+    'com.github.johnfactotum.Foliate',
+]);
+
+const AXES = {
+    v: {name: 'Vertical', factors: 'app-factors', global: 'global-factor', other: 'h'},
+    h: {name: 'Horizontal', factors: 'h-app-factors', global: 'h-global-factor', other: 'v'},
+};
+
 export default class TouchpadSpeedControlPreferences extends ExtensionPreferences {
-    /**
-     * Called by GNOME Settings to populate the preferences window.
-     *
-     * @param {Adw.PreferencesWindow} window - The preferences window instance.
-     */
     fillPreferencesWindow(window) {
-        window._settings = this.getSettings();
-
         window.set_default_size(850, 750);
-
-        // Check WSF status before building any UI
-        const wsfStatus = this._checkWSFStatus();
-
-        if (!wsfStatus.installed) {
-            this._showMissingPage(window);
-            return;
-        }
-
-        if (!wsfStatus.active) {
-            this._showInactivePage(window);
-            return;
-        }
-
-        this._showMainUI(window);
-    }
-
-    /**
-     * Checks if WSF is installed and active.
-     *
-     * Runs `wsf status` and parses output for:
-     *   - "enabled: yes" — environment.d config present
-     *   - "gnome-shell library mapped: yes" — preload library loaded into gnome-shell
-     *
-     * @returns {Object} { installed: boolean, active: boolean }
-     */
-     _checkWSFStatus() {
         const wsfPath = findWSFPath();
         if (!wsfPath) {
-            return { installed: false, active: false };
-        }
-
-        try {
-            const subprocess = Gio.Subprocess.new(
-                [wsfPath, 'status'],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE
-            );
-            const [, stdout] = subprocess.communicate_utf8(null, null);
-            subprocess.wait(null);
-
-            return { installed: true, active: isWSFActive(stdout) };
-        } catch (e) {
-            return { installed: true, active: false };
+            this._showStatus(window, _('WSF Not Installed'),
+                _('Touchpad Speed Control requires Wayland Scroll Factor (WSF). Install it for your distribution, run "wsf enable", then log out and back in.'),
+                _('Open WSF on GitHub'),
+                () => new Gtk.UriLauncher({uri: WSF_URL}).launch(window, null, null));
+        } else if (!this._wsfActive(wsfPath)) {
+            const page = this._showStatus(window, _('WSF Preload Not Active'),
+                _('Run "wsf enable" in a terminal, then log out and back in.'),
+                _('Check Again'),
+                () => {
+                    if (this._wsfActive(wsfPath)) {
+                        window.remove(page);
+                        new SettingsUI(this, window);
+                    }
+                });
+        } else {
+            new SettingsUI(this, window);
         }
     }
 
-    /**
-     * Displays the "WSF Not Installed" page.
-     *
-     * Shows an Adw.StatusPage with installation instructions and a button
-     * to open the WSF GitHub repository in the default browser.
-     * All scroll controls are hidden — the user must install WSF first.
-     *
-     * @param {Adw.PreferencesWindow} window - The preferences window instance.
-     */
-    _showMissingPage(window) {
-        const page = new Adw.PreferencesPage({
-            title: _('Touchpad Speed Control'),
-            icon_name: 'input-mouse-symbolic'
-        });
+    _wsfActive(wsfPath) {
+        const proc = Gio.Subprocess.new([wsfPath, 'status'], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE);
+        const [, stdout] = proc.communicate_utf8(null, null);
+        return isWSFActive(stdout);
+    }
 
+    _showStatus(window, title, description, buttonLabel, onClick) {
+        const button = new Gtk.Button({label: buttonLabel, halign: Gtk.Align.CENTER, css_classes: ['pill', 'suggested-action']});
+        button.connect('clicked', onClick);
+        const status = new Adw.StatusPage({title, description, icon_name: 'dialog-warning-symbolic', child: button, vexpand: true});
         const group = new Adw.PreferencesGroup();
-
-        const statusPage = new Adw.StatusPage({
-            title: _('WSF Not Installed'),
-            description: _('Touchpad Speed Control requires Wayland Scroll Factor (WSF) to function.'),
-            icon_name: 'dialog-warning-symbolic',
-            vexpand: true
-        });
-
-        const installBox = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            spacing: 12,
-            margin_top: 12,
-            margin_bottom: 12,
-            margin_start: 24,
-            margin_end: 24
-        });
-
-        const stepsLabel = new Gtk.Label({
-            label: _('To install WSF:\n\n1. Visit: https://github.com/daniel-g-carrasco/wayland-scroll-factor\n2. Follow the installation instructions for your distribution\n3. After installation, run: wsf enable\n4. Log out and log back in'),
-            wrap: true,
-            xalign: 0,
-            css_classes: ['body']
-        });
-        installBox.append(stepsLabel);
-
-        const openButton = new Gtk.Button({
-            label: _('Open GitHub'),
-            halign: Gtk.Align.CENTER,
-            margin_top: 8
-        });
-        openButton.connect('clicked', () => {
-            const launcher = Gtk.UriLauncher.new('https://github.com/daniel-g-carrasco/wayland-scroll-factor');
-            launcher.launch(window, null, (obj, res) => {
-                try {
-                    obj.launch_finish(res);
-                } catch (e) {}
-            });
-        });
-        installBox.append(openButton);
-
-        group.add(statusPage);
-        group.add(installBox);
+        group.add(status);
+        const page = new Adw.PreferencesPage();
         page.add(group);
         window.add(page);
-    }
-
-    /**
-     * Displays the "WSF Preload Not Active" page.
-     *
-     * Shows an Adw.StatusPage with activation instructions and a "Check Again"
-     * button that re-runs the WSF status check. If WSF is now active, closes the
-     * current window and opens a new one with the main UI.
-     *
-     * @param {Adw.PreferencesWindow} window - The preferences window instance.
-     */
-    _showInactivePage(window) {
-        const page = new Adw.PreferencesPage({
-            title: _('Touchpad Speed Control'),
-            icon_name: 'input-mouse-symbolic'
-        });
-
-        const group = new Adw.PreferencesGroup();
-
-        const statusPage = new Adw.StatusPage({
-            title: _('WSF Preload Not Active'),
-            description: _('The WSF preload library must be enabled for scroll factor changes to take effect.'),
-            icon_name: 'dialog-warning-symbolic',
-            vexpand: true
-        });
-
-        const stepsBox = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            spacing: 12,
-            margin_top: 12,
-            margin_bottom: 12,
-            margin_start: 24,
-            margin_end: 24
-        });
-
-        const stepsLabel = new Gtk.Label({
-            label: _('To activate WSF:\n\n1. Open a terminal\n2. Run: wsf enable\n3. Log out of your session\n4. Log back in\n\nAfter logging in, reopen the extension settings.'),
-            wrap: true,
-            xalign: 0,
-            css_classes: ['body']
-        });
-        stepsBox.append(stepsLabel);
-
-        const checkButton = new Gtk.Button({
-            label: _('Check Again'),
-            halign: Gtk.Align.CENTER,
-            margin_top: 8,
-            css_classes: ['suggested-action']
-        });
-        checkButton.connect('clicked', () => {
-            const wsfStatus = this._checkWSFStatus();
-            if (wsfStatus.active) {
-                window.close();
-                this._openPrefsWindow();
-            }
-        });
-        stepsBox.append(checkButton);
-
-        group.add(statusPage);
-        group.add(stepsBox);
-        page.add(group);
-        window.add(page);
-    }
-
-    /**
-     * Opens a new preferences window with the main UI.
-     * Used after the user clicks "Check Again" and WSF is now active.
-     */
-    _openPrefsWindow() {
-        const window = new Adw.PreferencesWindow();
-        window.set_default_size(850, 750);
-        this._showMainUI(window);
-        window.present();
-    }
-
-    /**
-     * Displays the main tabbed settings interface.
-     *
-     * Structure:
-     *   - Vertical Scroll tab: global slider, per-app sliders, search, reset, sync
-     *   - Horizontal Scroll tab: same layout, independent settings
-     *   - Gtk.StackSwitcher for tab navigation
-     *
-     * @param {Adw.PreferencesWindow} window - The preferences window instance.
-     */
-    _showMainUI(window) {
-        window._settings = this.getSettings();
-        const settingsUI = new Settings(window._settings);
-        settingsUI._window = window;
-        window.connect('close-request', () => {
-            settingsUI.destroy();
-            return false;
-        });
-
-        const page = new Adw.PreferencesPage({
-            title: _('Touchpad Speed Control'),
-            icon_name: 'input-mouse-symbolic'
-        });
-
-        // General tab content
-        const generalGroup = new Adw.PreferencesGroup({
-            title: _('General'),
-            description: _('Configure detection behavior and performance. Export/import your settings at the bottom.')
-        });
-
-        const cursorRow = new Adw.PreferencesRow({ activatable: false });
-        const cursorBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const cursorLabel = new Gtk.Label({
-            label: _('Enable cursor tracking'),
-            hexpand: true,
-            xalign: 0
-        });
-        const cursorSwitch = new Gtk.Switch({
-            active: window._settings.get_boolean('cursor-tracking-enabled'),
-            valign: Gtk.Align.CENTER
-        });
-        cursorSwitch.connect('notify::active', () => {
-            window._settings.set_boolean('cursor-tracking-enabled', cursorSwitch.get_active());
-        });
-        cursorBox.append(cursorLabel);
-        cursorBox.append(cursorSwitch);
-        cursorRow.set_child(cursorBox);
-        generalGroup.add(cursorRow);
-
-        const intervalRow = new Adw.PreferencesRow({ activatable: false });
-        const intervalBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const intervalLabel = new Gtk.Label({
-            label: _('Cursor check interval (ms)'),
-            hexpand: true,
-            xalign: 0
-        });
-        const intervalSpin = new Gtk.SpinButton({
-            adjustment: new Gtk.Adjustment({
-                lower: 50,
-                upper: 2000,
-                step_increment: 10,
-                page_increment: 100,
-                value: window._settings.get_int('cursor-poll-interval')
-            }),
-            valign: Gtk.Align.CENTER
-        });
-        intervalSpin.connect('value-changed', () => {
-            window._settings.set_int('cursor-poll-interval', intervalSpin.get_value_as_int());
-        });
-        intervalBox.append(intervalLabel);
-        intervalBox.append(intervalSpin);
-        intervalRow.set_child(intervalBox);
-        generalGroup.add(intervalRow);
-
-        const focusRow = new Adw.PreferencesRow({ activatable: false });
-        const focusBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const focusLabel = new Gtk.Label({
-            label: _('Enable focus detection'),
-            hexpand: true,
-            xalign: 0
-        });
-        const focusSwitch = new Gtk.Switch({
-            active: window._settings.get_boolean('focus-detection-enabled'),
-            valign: Gtk.Align.CENTER
-        });
-        focusSwitch.connect('notify::active', () => {
-            window._settings.set_boolean('focus-detection-enabled', focusSwitch.get_active());
-        });
-        focusBox.append(focusLabel);
-        focusBox.append(focusSwitch);
-        focusRow.set_child(focusBox);
-        generalGroup.add(focusRow);
-
-        const overviewRow = new Adw.PreferencesRow({ activatable: false });
-        const overviewBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const overviewLabels = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            hexpand: true
-        });
-        overviewLabels.append(new Gtk.Label({
-            label: _('Use global speed in the Overview'),
-            xalign: 0
-        }));
-        overviewLabels.append(new Gtk.Label({
-            label: _('While the Activities overview or app grid is open, scroll and swipe at the global speed instead of the focused app\'s.'),
-            xalign: 0,
-            wrap: true,
-            css_classes: ['dim-label', 'caption']
-        }));
-        const overviewSwitch = new Gtk.Switch({
-            active: window._settings.get_boolean('overview-global-factor'),
-            valign: Gtk.Align.CENTER
-        });
-        overviewSwitch.connect('notify::active', () => {
-            window._settings.set_boolean('overview-global-factor', overviewSwitch.get_active());
-        });
-        overviewBox.append(overviewLabels);
-        overviewBox.append(overviewSwitch);
-        overviewRow.set_child(overviewBox);
-        generalGroup.add(overviewRow);
-
-        // Debugging information group
-        const debugGroup = new Adw.PreferencesGroup({
-            title: _('Debugging Information'),
-            description: _('Diagnostics for checking which speed is applied.')
-        });
-
-        const panelRow = new Adw.PreferencesRow({ activatable: false });
-        const panelBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const panelLabel = new Gtk.Label({
-            label: _('Panel indicator'),
-            hexpand: true,
-            xalign: 0
-        });
-        const panelSwitch = new Gtk.Switch({
-            active: window._settings.get_boolean('show-panel-indicator'),
-            valign: Gtk.Align.CENTER
-        });
-        panelSwitch.connect('notify::active', () => {
-            window._settings.set_boolean('show-panel-indicator', panelSwitch.get_active());
-        });
-        panelBox.append(panelLabel);
-        panelBox.append(panelSwitch);
-        panelRow.set_child(panelBox);
-        debugGroup.add(panelRow);
-
-        const debugLogRow = new Adw.PreferencesRow({ activatable: false });
-        const debugLogBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const debugLogLabels = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            hexpand: true
-        });
-        debugLogLabels.append(new Gtk.Label({
-            label: _('Debug logging'),
-            xalign: 0
-        }));
-        debugLogLabels.append(new Gtk.Label({
-            label: _('Log detected apps and applied speeds. View with: journalctl -f -o cat | grep TouchpadSpeed'),
-            xalign: 0,
-            wrap: true,
-            selectable: true,
-            css_classes: ['dim-label', 'caption']
-        }));
-        const debugLogSwitch = new Gtk.Switch({
-            active: window._settings.get_boolean('debug-logging'),
-            valign: Gtk.Align.CENTER
-        });
-        debugLogSwitch.connect('notify::active', () => {
-            window._settings.set_boolean('debug-logging', debugLogSwitch.get_active());
-        });
-        debugLogBox.append(debugLogLabels);
-        debugLogBox.append(debugLogSwitch);
-        debugLogRow.set_child(debugLogBox);
-        debugGroup.add(debugLogRow);
-
-        const quickRow = new Adw.PreferencesRow({ activatable: false });
-        const quickBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-        const quickLabels = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            hexpand: true
-        });
-        quickLabels.append(new Gtk.Label({
-            label: _('Quick Settings tile'),
-            xalign: 0
-        }));
-        quickLabels.append(new Gtk.Label({
-            label: _('Shows the applied speeds, with − / + for the focused app and the calibration actions in its menu.'),
-            xalign: 0,
-            wrap: true,
-            css_classes: ['dim-label', 'caption']
-        }));
-        const quickSwitch = new Gtk.Switch({
-            active: window._settings.get_boolean('show-quick-settings'),
-            valign: Gtk.Align.CENTER
-        });
-        quickSwitch.connect('notify::active', () => {
-            window._settings.set_boolean('show-quick-settings', quickSwitch.get_active());
-        });
-        quickBox.append(quickLabels);
-        quickBox.append(quickSwitch);
-        quickRow.set_child(quickBox);
-        generalGroup.add(quickRow);
-
-        // Import/Export: add buttons at the bottom of the General group
-        const ioBox = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            spacing: 6,
-            margin_top: 10,
-            margin_bottom: 10
-        });
-
-        const ioDesc = new Gtk.Label({
-            label: _('Backup or restore all scroll factor settings as a JSON file.'),
-            css_classes: ['dim-label'],
-            xalign: 0.5,
-            wrap: true,
-            max_width_chars: 40
-        });
-        ioBox.append(ioDesc);
-
-        const ioBtnBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 10,
-            halign: Gtk.Align.CENTER
-        });
-
-        const exportBtn = new Gtk.Button({
-            label: _('Export Settings'),
-            css_classes: ['flat']
-        });
-        exportBtn.connect('clicked', () => settingsUI._exportSettings());
-        ioBtnBox.append(exportBtn);
-
-        const importBtn = new Gtk.Button({
-            label: _('Import Settings'),
-            css_classes: ['flat']
-        });
-        importBtn.connect('clicked', () => settingsUI._importSettings());
-        ioBtnBox.append(importBtn);
-
-        ioBox.append(ioBtnBox);
-
-        const ioRow = new Adw.PreferencesRow({ activatable: false });
-        ioRow.set_child(ioBox);
-        generalGroup.add(ioRow);
-
-        // General tab uses an Adw.PreferencesPage to properly render group headings
-        const generalPage = new Adw.PreferencesPage();
-        generalPage.add(generalGroup);
-        const calibrationGroup = settingsUI.createCalibrationGroup();
-        calibrationGroup.margin_top = 12;
-        generalPage.add(calibrationGroup);
-        debugGroup.margin_top = 12;
-        generalPage.add(debugGroup);
-
-        // Vertical tab content
-        const vGroup = new Adw.PreferencesGroup({
-            title: _('Vertical Scroll'),
-            description: _('Per-application vertical scroll factor control.')
-        });
-        vGroup.add(settingsUI.createFactorRow('v'));
-        vGroup.add(settingsUI.vActionBox);
-        vGroup.add(settingsUI.vRulesBox);
-        vGroup.add(settingsUI.vSearchEntry);
-        vGroup.add(settingsUI.vAppList);
-
-        // Horizontal tab content
-        const hGroup = new Adw.PreferencesGroup({
-            title: _('Horizontal Scroll'),
-            description: _('Per-application horizontal scroll factor control.')
-        });
-        hGroup.add(settingsUI.createFactorRow('h'));
-        hGroup.add(settingsUI.hActionBox);
-        hGroup.add(settingsUI.hRulesBox);
-        hGroup.add(settingsUI.hSearchEntry);
-        hGroup.add(settingsUI.hAppList);
-
-        // Gtk.Stack for tab switching
-        const stack = new Gtk.Stack({
-            transition_type: Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
-            hhomogeneous: false
-        });
-
-        stack.add_titled(generalPage, 'general', _('General'));
-        stack.add_titled(vGroup, 'vertical', _('Vertical'));
-        stack.add_titled(hGroup, 'horizontal', _('Horizontal'));
-
-        // Tab switcher widget
-        const stackSwitcher = new Gtk.StackSwitcher({
-            stack: stack,
-            halign: Gtk.Align.CENTER,
-            margin_top: 10,
-            margin_bottom: 10
-        });
-
-        // Container group holds both the switcher and the stack
-        const containerGroup = new Adw.PreferencesGroup();
-        containerGroup.add(stackSwitcher);
-        containerGroup.add(stack);
-
-        page.add(containerGroup);
-        window.add(page);
-
-        // Scan and populate the app list (shared between both tabs)
-        settingsUI.loadApps();
+        return page;
     }
 }
 
-/**
- * Settings
- *
- * Manages the preferences UI: app discovery, factor sliders, search, reset, and sync.
- *
- * Key design decisions:
- *   - _suppressSave flag prevents cascading GSettings writes when programmatically
- *     updating slider values (e.g., during sync or reset operations)
- *   - renderAppListWithFactors() passes factor data to createAppRow()
- *     directly instead of re-reading from GSettings, avoiding cache staleness issues
- *   - loadApps() reads the installed apps once (via Gio.AppInfo) and shares the result between both tabs
- *   - Debounced saves (200ms) prevent excessive D-Bus traffic during slider dragging
- */
-class Settings {
-    /**
-     * @param {Gio.Settings} schema - The GSettings instance for this extension.
-     */
-    constructor(schema) {
-        this.schema = schema;
-        this.apps = [];
-        this.vFilteredApps = [];
-        this.hFilteredApps = [];
-        // Prevents value-changed handlers from triggering GSettings writes
-        // during programmatic slider updates (sync, reset, global slider changes)
-        this._suppressSave = false;
+class SettingsUI {
+    constructor(extension, window) {
+        this._window = window;
+        this._settings = extension.getSettings();
+        this._apps = this._loadApps();
+        this._lists = {};
+        this._globalRows = {};
+        this._ruleGroups = {};
+        this._ruleRows = {v: [], h: []};
 
-        // Vertical search entry
-        this.vSearchEntry = new Gtk.SearchEntry({
-            placeholder_text: _('Search applications...'),
-            hexpand: true,
-            margin_top: 10,
-            margin_bottom: 10,
-            margin_start: 10,
-            margin_end: 10
-        });
-
-        // Vertical app list (scrolled window containing a list box)
-        this.vAppList = new Gtk.ScrolledWindow({
-            vexpand: true,
-            hexpand: true,
-            hscrollbar_policy: Gtk.PolicyType.NEVER,
-            vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
-            min_content_height: 400
-        });
-
-        this.vListBox = new Gtk.ListBox({
-            selection_mode: Gtk.SelectionMode.NONE,
-            css_classes: ['boxed-list']
-        });
-
-        this.vAppList.set_child(this.vListBox);
-
-        // Vertical action box (reset + sync buttons)
-        this.vActionBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 10,
-            margin_top: 10,
-            margin_bottom: 10,
-            margin_start: 10,
-            margin_end: 10,
-            halign: Gtk.Align.END
-        });
-
-        const vResetButton = new Gtk.Button({
-            label: _('Reset to Defaults'),
-            css_classes: ['flat']
-        });
-        vResetButton.connect('clicked', () => this.resetVToDefaults());
-        this.vActionBox.append(vResetButton);
-
-        const vSyncButton = new Gtk.Button({
-            label: _('Sync to Horizontal'),
-            css_classes: ['flat']
-        });
-        vSyncButton.connect('clicked', () => this.syncVToH());
-        this.vActionBox.append(vSyncButton);
-
-        // Horizontal search entry
-        this.hSearchEntry = new Gtk.SearchEntry({
-            placeholder_text: _('Search applications...'),
-            hexpand: true,
-            margin_top: 10,
-            margin_bottom: 10,
-            margin_start: 10,
-            margin_end: 10
-        });
-
-        // Horizontal app list
-        this.hAppList = new Gtk.ScrolledWindow({
-            vexpand: true,
-            hexpand: true,
-            hscrollbar_policy: Gtk.PolicyType.NEVER,
-            vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
-            min_content_height: 400
-        });
-
-        this.hListBox = new Gtk.ListBox({
-            selection_mode: Gtk.SelectionMode.NONE,
-            css_classes: ['boxed-list']
-        });
-
-        this.hAppList.set_child(this.hListBox);
-
-        // Horizontal action box
-        this.hActionBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 10,
-            margin_top: 10,
-            margin_bottom: 10,
-            margin_start: 10,
-            margin_end: 10,
-            halign: Gtk.Align.END
-        });
-
-        const hResetButton = new Gtk.Button({
-            label: _('Reset to Defaults'),
-            css_classes: ['flat']
-        });
-        hResetButton.connect('clicked', () => this.resetHToDefaults());
-        this.hActionBox.append(hResetButton);
-
-        const hSyncButton = new Gtk.Button({
-            label: _('Sync to Vertical'),
-            css_classes: ['flat']
-        });
-        hSyncButton.connect('clicked', () => this.syncHToV());
-        this.hActionBox.append(hSyncButton);
-
-        // Wildcard rules (e.g. brave-*) for each axis
-        this.vRulesBox = this._createRulesBox('v');
-        this.hRulesBox = this._createRulesBox('h');
-
-        // Search handlers — filter and re-render on text change
-        this.vSearchEntry.connect('search-changed', () => {
-            this.filterApps('v');
-        });
-
-        this.hSearchEntry.connect('search-changed', () => {
-            this.filterApps('h');
+        window.add(this._buildGeneralPage());
+        window.add(this._buildAxisPage('v'));
+        window.add(this._buildAxisPage('h'));
+        window.connect('close-request', () => {
+            for (const id of this._calibrationHandlers)
+                this._settings.disconnect(id);
+            return false;
         });
     }
 
-    /**
-     * Creates a global factor slider row for the given axis.
-     *
-     * The global factor slider controls the default fallback value for all apps
-     * that don't have a per-app override. Changing it updates all per-app factors
-     * to match (after a 200ms debounce).
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @returns {Adw.PreferencesRow} The constructed preferences row.
-     */
-    createFactorRow(axis) {
-        const row = new Adw.PreferencesRow({
-            activatable: false
+    _toast(title) {
+        this._window.add_toast(new Adw.Toast({title, timeout: 2}));
+    }
+
+    _buildGeneralPage() {
+        const page = new Adw.PreferencesPage({title: _('General'), icon_name: 'preferences-system-symbolic'});
+
+        const general = new Adw.PreferencesGroup({title: _('General')});
+        const bind = (key, row) => {
+            this._settings.bind(key, row, row instanceof Adw.SpinRow ? 'value' : 'active', Gio.SettingsBindFlags.DEFAULT);
+            general.add(row);
+        };
+        bind('cursor-tracking-enabled', new Adw.SwitchRow({
+            title: _('Cursor tracking'),
+            subtitle: _('Use the speed of the window under the pointer, even if it is not focused'),
+        }));
+        bind('cursor-poll-interval', new Adw.SpinRow({
+            title: _('Cursor check interval (ms)'),
+            adjustment: new Gtk.Adjustment({lower: 50, upper: 2000, step_increment: 10, page_increment: 100}),
+        }));
+        bind('focus-detection-enabled', new Adw.SwitchRow({title: _('Focus detection')}));
+        bind('overview-global-factor', new Adw.SwitchRow({
+            title: _('Use global speed in the Overview'),
+            subtitle: _('Scroll and swipe at the global speed while the Activities overview or app grid is open'),
+        }));
+        bind('show-quick-settings', new Adw.SwitchRow({
+            title: _('Quick Settings tile'),
+            subtitle: _('Shows the applied speeds, with − / + for the focused app and the calibration actions'),
+        }));
+        page.add(general);
+
+        page.add(this._buildCalibrationGroup());
+
+        const backup = new Adw.PreferencesGroup({
+            title: _('Backup'),
+            description: _('Save or restore all speeds, rules and calibration as a JSON file.'),
         });
-
-        const box = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-
-        // Axis-specific icon: down arrow for vertical, right arrow for horizontal
-        const icon = new Gtk.Image({
-            icon_name: axis === 'v' ? 'go-down-symbolic' : 'go-next-symbolic',
-            pixel_size: 32
-        });
-
-        const label = new Gtk.Label({
-            label: axis === 'v' ? _('Global vertical factor') : _('Global horizontal factor'),
-            xalign: 0,
-            width_chars: 18,
-            max_width_chars: 18,
-            ellipsize: Pango.EllipsizeMode.END,
-            css_classes: ['heading']
-        });
-
-        const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
-        const currentFactor = this.schema.get_double(globalFactorKey);
-
-        const valueLabel = new Gtk.Label({
-            label: currentFactor.toFixed(2),
-            width_chars: 5,
-            xalign: 1,
-            css_classes: ['dim-label']
-        });
-
-        // Store references for programmatic updates during sync/reset
-        if (axis === 'v') {
-            this.vFactorLabel = valueLabel;
-        } else {
-            this.hFactorLabel = valueLabel;
+        for (const [title, callback] of [[_('Export Settings'), () => this._export()], [_('Import Settings'), () => this._import()]]) {
+            const row = new Adw.ActionRow({title, activatable: true});
+            row.add_suffix(new Gtk.Image({icon_name: 'go-next-symbolic'}));
+            row.connect('activated', callback);
+            backup.add(row);
         }
+        page.add(backup);
 
-        const adjustment = new Gtk.Adjustment({
-            lower: 0.05,
-            upper: 2.00,
-            step_increment: 0.01,
-            page_increment: 0.1,
-            value: currentFactor
-        });
-
-        if (axis === 'v') {
-            this.vFactorAdjustment = adjustment;
-        } else {
-            this.hFactorAdjustment = adjustment;
+        const debug = new Adw.PreferencesGroup({title: _('Debugging')});
+        for (const [key, title, subtitle] of [
+            ['show-panel-indicator', _('Panel indicator'), _('Shows the applied speeds in the top bar')],
+            ['debug-logging', _('Debug logging'), _('View with: journalctl -f -o cat | grep TouchpadSpeed')],
+        ]) {
+            const row = new Adw.SwitchRow({title, subtitle});
+            this._settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            debug.add(row);
         }
+        page.add(debug);
+        return page;
+    }
 
-        const scale = new Gtk.Scale({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            adjustment: adjustment,
-            hexpand: true,
-            width_request: 180,
-            draw_value: false,
-            digits: 2
+    _buildAxisPage(axis) {
+        const {global, other} = AXES[axis];
+        const name = _(AXES[axis].name);
+        const page = new Adw.PreferencesPage({
+            title: name,
+            icon_name: axis === 'v' ? 'object-flip-vertical-symbolic' : 'object-flip-horizontal-symbolic',
         });
 
-        // Visual marks at common factor values
-        scale.add_mark(0.15, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(0.35, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(0.50, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(1.00, Gtk.PositionType.BOTTOM, null);
+        const globalGroup = new Adw.PreferencesGroup({
+            title: _('%s Scroll').replace('%s', name),
+            description: _('Speed for apps without their own setting. Moving it sets every app to the same speed.'),
+        });
+        const actions = new Gtk.Box({spacing: 6});
+        for (const [label, callback] of [
+            [_('Reset'), () => this._reset(axis)],
+            [_('Copy to %s').replace('%s', _(AXES[other].name)), () => this._copyAxis(axis)],
+        ]) {
+            const button = new Gtk.Button({label, css_classes: ['flat']});
+            button.connect('clicked', callback);
+            actions.append(button);
+        }
+        globalGroup.set_header_suffix(actions);
+        this._globalRows[axis] = this._factorRow({
+            title: _('Global speed'),
+            iconName: axis === 'v' ? 'go-down-symbolic' : 'go-next-symbolic',
+            value: this._settings.get_double(global),
+            onChange: value => this._setGlobal(axis, value),
+        });
+        globalGroup.add(this._globalRows[axis]);
+        page.add(globalGroup);
 
-        // Debounced save: updates global factor and all per-app factors
-        let saveTimeout = null;
+        const rules = new Adw.PreferencesGroup({
+            title: _('Rules'),
+            description: _('Give every app whose ID matches a rule the same speed, including apps installed later. ' +
+                '* matches anything, ? one character, for example brave-* for all Brave web apps. ' +
+                'A speed set for a single app takes priority.'),
+        });
+        const entry = new Adw.EntryRow({title: _('New rule'), show_apply_button: true});
+        entry.connect('apply', () => {
+            if (this._addRule(axis, entry.text))
+                entry.text = '';
+        });
+        rules.add(entry);
+        this._ruleGroups[axis] = rules;
+        page.add(rules);
+
+        const apps = new Adw.PreferencesGroup({title: _('Applications')});
+        const search = new Gtk.SearchEntry({placeholder_text: _('Search applications'), margin_bottom: 12});
+        const list = new Gtk.ListBox({selection_mode: Gtk.SelectionMode.NONE, css_classes: ['boxed-list']});
+        list.set_filter_func(row => {
+            const text = search.text.toLowerCase();
+            return row.app.name.toLowerCase().includes(text) || row.app.id.toLowerCase().includes(text);
+        });
+        search.connect('search-changed', () => list.invalidate_filter());
+        apps.add(search);
+        apps.add(list);
+        this._lists[axis] = list;
+        page.add(apps);
+
+        this._render(axis);
+        return page;
+    }
+
+    // A row with a slider, − / + and the value; saves when the slider stops
+    // moving rather than on every step of a drag
+    _factorRow({title, gicon = null, iconName = null, value, tooltip = null, onChange}) {
+        const row = new Adw.ActionRow({title, use_markup: false, title_lines: 1});
+        if (gicon || iconName)
+            row.add_prefix(new Gtk.Image(gicon ? {gicon, pixel_size: 32} : {icon_name: iconName, pixel_size: 32}));
+
+        const adjustment = new Gtk.Adjustment({lower: FACTOR_MIN, upper: FACTOR_MAX, step_increment: FACTOR_STEP, page_increment: 0.1, value});
+        const scale = new Gtk.Scale({adjustment, width_request: 180, draw_value: false, valign: Gtk.Align.CENTER});
+        for (const mark of [0.15, 0.35, 0.5, 1.0])
+            scale.add_mark(mark, Gtk.PositionType.BOTTOM, null);
+        const label = new Gtk.Label({label: value.toFixed(2), width_chars: 5, xalign: 1, css_classes: ['dim-label'], tooltip_text: tooltip});
+
+        let source = 0;
         adjustment.connect('value-changed', () => {
-            if (this._suppressSave) {
-                if (saveTimeout) {
-                    GLib.source_remove(saveTimeout);
-                    saveTimeout = null;
-                }
+            label.label = adjustment.value.toFixed(2);
+            if (row.quiet)
                 return;
-            }
-            const newValue = adjustment.get_value();
-            valueLabel.set_label(newValue.toFixed(2));
-            if (saveTimeout) GLib.source_remove(saveTimeout);
-            saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-                this.updateAllFactors(axis, newValue);
-                saveTimeout = null;
+            if (source)
+                GLib.source_remove(source);
+            source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                source = 0;
+                onChange(Math.round(adjustment.value * 100) / 100);
                 return GLib.SOURCE_REMOVE;
             });
         });
-
-        // Minus button (decrease by 0.01)
-        const minusBtn = new Gtk.Button({
-            label: '−',
-            css_classes: ['circular', 'flat'],
-            width_request: 32,
-            height_request: 32
-        });
-        minusBtn.connect('clicked', () => {
-            const currentValue = adjustment.get_value();
-            const newValue = Math.max(0.05, currentValue - 0.01);
-            adjustment.set_value(newValue);
-        });
-
-        // Plus button (increase by 0.01)
-        const plusBtn = new Gtk.Button({
-            label: '+',
-            css_classes: ['circular', 'flat'],
-            width_request: 32,
-            height_request: 32
-        });
-        plusBtn.connect('clicked', () => {
-            const currentValue = adjustment.get_value();
-            const newValue = Math.min(2.00, currentValue + 0.01);
-            adjustment.set_value(newValue);
-        });
-
-        box.append(icon);
-        box.append(label);
-        box.append(scale);
-        box.append(minusBtn);
-        box.append(valueLabel);
-        box.append(plusBtn);
-
-        row.set_child(box);
+        const stepButton = (text, delta) => {
+            const button = new Gtk.Button({label: text, valign: Gtk.Align.CENTER, css_classes: ['circular', 'flat']});
+            button.connect('clicked', () => adjustment.set_value(adjustment.value + delta));
+            return button;
+        };
+        row.add_suffix(scale);
+        row.add_suffix(stepButton('−', -FACTOR_STEP));
+        row.add_suffix(label);
+        row.add_suffix(stepButton('+', FACTOR_STEP));
+        row.setValue = newValue => {
+            row.quiet = true;
+            adjustment.value = newValue;
+            row.quiet = false;
+        };
         return row;
     }
 
-    /**
-     * Discovers installed applications through GIO (the same list GNOME uses)
-     * and populates this.apps with app metadata.
-     *
-     * Filtering rules:
-     *   - Skips apps GNOME would not show (NoDisplay, Hidden, OnlyShowIn/NotShowIn)
-     *   - Skips URL handler variants (e.g. code-url-handler) when the base app exists
-     *
-     * Sorting: known apps (Chrome, Firefox, VS Code, etc.) are prioritized to the top,
-     * then alphabetically within each group.
-     */
-    loadApps() {
-        // Common apps to prioritize at the top of the list
-        const knownApps = [
-            'chrome', 'google-chrome-stable', 'google-chrome-unstable',
-            'google-chrome-beta', 'google-chrome-dev', 'com.google.Chrome',
-            'com.google.Chrome.unstable', 'firefox', 'firefox-developer',
-            'firefox-nightly', 'code', 'code-url-handler', 'org.gnome.Terminal',
-            'telegram-desktop', 'discord', 'slack', 'org.gnome.Nautilus',
-            'org.gnome.TextEditor', 'org.gnome.gedit', 'okular',
-            'org.gnome.Evince', 'com.github.johnfactotum.Foliate'
-        ];
-
-        const appMap = new Map();
-
+    _loadApps() {
+        const apps = new Map();
         for (const info of Gio.AppInfo.get_all()) {
-            if (!info.should_show()) continue;
+            const id = normalizeAppId(info.get_id() ?? '');
+            if (info.should_show() && id && !apps.has(id))
+                apps.set(id, {id, name: info.get_display_name(), gicon: info.get_icon(), exec: info.get_commandline() ?? ''});
+        }
+        // Hide URL-handler duplicates (code-url-handler next to code)
+        for (const [id, app] of apps) {
+            const base = id.replace('-url-handler', '').replace('-default', '');
+            if (base !== id && apps.has(base) && / %[uU]\b/.test(app.exec))
+                apps.delete(id);
+        }
+        return [...apps.values()].sort((a, b) =>
+            (KNOWN_APPS.has(b.id) - KNOWN_APPS.has(a.id)) || a.name.localeCompare(b.name));
+    }
 
-            const appId = normalizeAppId(info.get_id() || '');
-            if (!appId || appMap.has(appId)) continue;
+    _render(axis) {
+        const {factors: key, global} = AXES[axis];
+        const factors = this._settings.get_value(key).deep_unpack();
+        const globalFactor = this._settings.get_double(global);
+        this._globalRows[axis].setValue(globalFactor);
 
-            appMap.set(appId, {
-                id: appId,
-                name: info.get_display_name(),
-                gicon: info.get_icon(),
-                icon: 'application-x-executable',
-                exec: info.get_commandline() || ''
+        const row = (title, id, extra) => {
+            const resolved = resolveFactor(factors, id, globalFactor);
+            return this._factorRow({
+                title,
+                value: resolved.factor,
+                tooltip: ['pattern', 'partial'].includes(resolved.source) ? _('Set by %s').replace('%s', resolved.key) : null,
+                onChange: value => this._setAppFactor(axis, id, value),
+                ...extra,
             });
+        };
+
+        const list = this._lists[axis];
+        list.remove_all();
+        for (const app of this._apps) {
+            const appRow = row(app.name, app.id, {gicon: app.gicon ?? null, iconName: app.gicon ? null : 'application-x-executable'});
+            appRow.app = app;
+            list.append(appRow);
         }
 
-        // Skip URL handler variants if the base app exists. Done after
-        // collecting everything so the result does not depend on scan order.
-        for (const [appId, app] of [...appMap]) {
-            if (!/ %[uU]\b/.test(app.exec)) continue;
-            const baseAppId = appId.replace('-url-handler', '').replace('-default', '');
-            if (baseAppId !== appId && appMap.has(baseAppId)) {
-                appMap.delete(appId);
-            }
-        }
-
-        this.apps = Array.from(appMap.values());
-        this.apps.sort((a, b) => a.name.localeCompare(b.name));
-
-        // Prioritize known apps to the top
-        const knownAppsSet = new Set(knownApps);
-        this.apps.sort((a, b) => {
-            const aKnown = knownAppsSet.has(a.id) ? 0 : 1;
-            const bKnown = knownAppsSet.has(b.id) ? 0 : 1;
-            return aKnown - bKnown || a.name.localeCompare(b.name);
+        for (const ruleRow of this._ruleRows[axis])
+            this._ruleGroups[axis].remove(ruleRow);
+        this._ruleRows[axis] = Object.keys(factors).filter(isPattern).sort().map(rule => {
+            const ruleRow = row(rule, rule, {iconName: 'edit-find-symbolic'});
+            const remove = new Gtk.Button({icon_name: 'user-trash-symbolic', tooltip_text: _('Remove rule'), valign: Gtk.Align.CENTER, css_classes: ['flat']});
+            remove.connect('clicked', () => this._removeRule(axis, rule));
+            ruleRow.add_suffix(remove);
+            this._ruleGroups[axis].add(ruleRow);
+            return ruleRow;
         });
-
-        this.filterApps('v');
-        this.filterApps('h');
     }
 
-    /**
-     * Filters the app list based on search text for the given axis.
-     * Searches both app name and app ID.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     */
-    filterApps(axis) {
-        const searchText = axis === 'v'
-            ? this.vSearchEntry.get_text().toLowerCase()
-            : this.hSearchEntry.get_text().toLowerCase();
-
-        const filtered = this.apps.filter(app =>
-            app.name.toLowerCase().includes(searchText) ||
-            app.id.toLowerCase().includes(searchText)
-        );
-
-        if (axis === 'v') {
-            this.vFilteredApps = filtered;
-            this.renderAppList('v');
-        } else {
-            this.hFilteredApps = filtered;
-            this.renderAppList('h');
-        }
-    }
-
-    /**
-     * Renders the per-app factor slider list for the given axis.
-     * Reads factors from GSettings and creates a row for each filtered app.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     */
-    renderAppList(axis) {
-        this._renderAppRows(axis);
-        this.renderRuleList(axis);
-    }
-
-    /**
-     * Renders only the per-app rows (not the rules) for the given axis.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     */
-    _renderAppRows(axis) {
-        const listBox = axis === 'v' ? this.vListBox : this.hListBox;
-
-        while (listBox.get_first_child()) {
-            listBox.remove(listBox.get_first_child());
-        }
-
-        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
-        const factors = this.schema.get_value(factorsKey).deep_unpack();
-
-        const apps = axis === 'v' ? this.vFilteredApps : this.hFilteredApps;
-
-        for (const app of apps) {
-            const row = this.createAppRow(app, factors, axis);
-            listBox.append(row);
-        }
-    }
-
-    /**
-     * Creates a per-app factor slider row.
-     *
-     * @param {Object} app - App metadata { id, name, icon, gicon, exec }.
-     * @param {Object} factors - The per-app factors dictionary.
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @param {function|null} [onRemove] - Adds a remove button (used for rules).
-     * @param {number|null} [globalFactor] - Global factor to fall back to; read
-     *   from GSettings if null.
-     * @returns {Adw.PreferencesRow} The constructed preferences row.
-     */
-    createAppRow(app, factors, axis, onRemove = null, globalFactor = null) {
-        const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
-        if (globalFactor === null) globalFactor = this.schema.get_double(globalFactorKey);
-        const resolved = resolveFactor(factors, app.id, globalFactor);
-        const factor = resolved.factor;
-
-        const row = new Adw.PreferencesRow({
-            activatable: false,
-            css_classes: ['property-row']
-        });
-
-        const box = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
-            margin_start: 12,
-            margin_end: 12,
-            margin_top: 8,
-            margin_bottom: 8
-        });
-
-        const icon = new Gtk.Image({
-            pixel_size: 32
-        });
-        if (app.gicon) {
-            icon.set_from_gicon(app.gicon);
-        } else {
-            icon.set_from_icon_name(app.icon);
-        }
-
-        // Fallback for missing icons
-        icon.connect('notify::gicon', () => {
-            if (!icon.get_icon_name() && !icon.get_gicon()) {
-                icon.set_from_icon_name('application-x-executable');
-            }
-        });
-
-        const nameLabel = new Gtk.Label({
-            label: app.name,
-            xalign: 0,
-            width_chars: 18,
-            max_width_chars: 18,
-            ellipsize: Pango.EllipsizeMode.END,
-            tooltip_text: app.name,
-            css_classes: ['heading']
-        });
-
-        const valueLabel = new Gtk.Label({
-            label: factor.toFixed(2),
-            width_chars: 5,
-            xalign: 1,
-            css_classes: ['dim-label']
-        });
-        if (resolved.source === 'pattern' || resolved.source === 'partial') {
-            valueLabel.set_tooltip_text(_('Set by') + ' ' + resolved.key);
-        }
-
-        const adjustment = new Gtk.Adjustment({
-            lower: 0.05,
-            upper: 2.00,
-            step_increment: 0.01,
-            page_increment: 0.1,
-            value: factor
-        });
-
-        const scale = new Gtk.Scale({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            adjustment: adjustment,
-            hexpand: true,
-            width_request: 180,
-            draw_value: false,
-            digits: 2
-        });
-
-        scale.add_mark(0.15, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(0.35, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(0.50, Gtk.PositionType.BOTTOM, null);
-        scale.add_mark(1.00, Gtk.PositionType.BOTTOM, null);
-
-        // Debounced save for per-app factor
-        let saveTimeout = null;
-        adjustment.connect('value-changed', () => {
-            if (this._suppressSave) {
-                if (saveTimeout) {
-                    GLib.source_remove(saveTimeout);
-                    saveTimeout = null;
-                }
-                return;
-            }
-            const newValue = adjustment.get_value();
-            valueLabel.set_label(newValue.toFixed(2));
-            if (saveTimeout) GLib.source_remove(saveTimeout);
-            saveTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-                this.updateAppFactor(app.id, newValue, axis);
-                saveTimeout = null;
-                return GLib.SOURCE_REMOVE;
-            });
-        });
-
-        const minusBtn = new Gtk.Button({
-            label: '−',
-            css_classes: ['circular', 'flat'],
-            width_request: 32,
-            height_request: 32
-        });
-        minusBtn.connect('clicked', () => {
-            const currentValue = adjustment.get_value();
-            const newValue = Math.max(0.05, currentValue - 0.01);
-            adjustment.set_value(newValue);
-        });
-
-        const plusBtn = new Gtk.Button({
-            label: '+',
-            css_classes: ['circular', 'flat'],
-            width_request: 32,
-            height_request: 32
-        });
-        plusBtn.connect('clicked', () => {
-            const currentValue = adjustment.get_value();
-            const newValue = Math.min(2.00, currentValue + 0.01);
-            adjustment.set_value(newValue);
-        });
-
-        box.append(icon);
-        box.append(nameLabel);
-        box.append(scale);
-        box.append(minusBtn);
-        box.append(valueLabel);
-        box.append(plusBtn);
-
-        if (onRemove) {
-            const removeBtn = new Gtk.Button({
-                icon_name: 'user-trash-symbolic',
-                tooltip_text: _('Remove rule'),
-                css_classes: ['circular', 'flat'],
-                valign: Gtk.Align.CENTER
-            });
-            removeBtn.connect('clicked', onRemove);
-            box.append(removeBtn);
-        }
-
-        row.set_child(box);
-
-        return row;
-    }
-
-    /**
-     * Updates the global factor and sets ALL per-app factors to the same value.
-     *
-     * Uses _suppressSave to prevent the global slider's value-changed handler
-     * from triggering another updateAllFactors call (which would cause an infinite loop).
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @param {number} factor - The new factor value.
-     */
-    updateAllFactors(axis, factor) {
-        this._suppressSave = true;
-
-        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
-        const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
-
-        this.schema.set_double(globalFactorKey, factor);
-
-        const factors = this.schema.get_value(factorsKey).deep_unpack();
-        for (const appId of Object.keys(factors)) {
-            factors[appId] = factor;
-        }
-        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, factor, axis));
-        this.schema.set_value(factorsKey, variant);
-
-        this.renderAppList(axis);
-
-        if (axis === 'v') {
-            this.vFactorLabel.set_label(factor.toFixed(2));
-            this.vFactorAdjustment.set_value(factor);
-        } else {
-            this.hFactorLabel.set_label(factor.toFixed(2));
-            this.hFactorAdjustment.set_value(factor);
-        }
-
-        this._suppressSave = false;
-    }
-
-    /**
-     * Updates a single per-app factor in GSettings.
-     *
-     * @param {string} appId - The application ID.
-     * @param {number} factor - The new factor value.
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     */
-    updateAppFactor(appId, factor, axis) {
-        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
-
-        // A hand-set factor wins over calibration: stop matching this app
-        const matched = this.schema.get_strv('matched-apps');
-        const stillMatched = matched.filter(id => normalizeAppId(id) !== normalizeAppId(appId));
-        if (stillMatched.length !== matched.length) {
-            this.schema.set_strv('matched-apps', stillMatched);
-            this._showToast(_('%s no longer follows the scroll reference').replace('%s', this._appName(appId)));
-        }
-
-        const factors = this.schema.get_value(factorsKey).deep_unpack();
-        factors[appId] = factor;
-
-        const variant = new GLib.Variant('a{sd}', factors);
-        this.schema.set_value(factorsKey, variant);
-
-        // A rule can change the effective value of many app rows
-        if (isPattern(appId)) {
-            this._renderAppRows(axis);
-        }
-    }
-
-    /**
-     * Applies calibration to a factors dictionary about to be written, so
-     * matched apps keep following the reference instead of taking one value.
-     *
-     * @param {Object<string, number>} factors - The new app factors.
-     * @param {number} globalFactor - The new global factor.
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @returns {Object<string, number>} The factors with matched apps updated.
-     */
-    _withMatchedFactors(factors, globalFactor, axis) {
-        const reference = this.schema.get_string('scroll-reference');
-        let gains = this.schema.get_value('scroll-gains').deep_unpack();
+    // Writes factors for one axis, keeping calibrated apps matched to the reference
+    _writeFactors(axis, factors) {
+        const {factors: key, global} = AXES[axis];
+        const reference = this._settings.get_string('scroll-reference');
+        let gains = this._settings.get_value('scroll-gains').deep_unpack();
         if (axis === 'h')
-            gains = horizontalMatchingGains(gains, this.schema.get_value('h-scroll-gains').deep_unpack(), reference);
-        return applyMatchedFactors(
-            factors,
-            globalFactor,
-            gains,
-            this.schema.get_strv('matched-apps'),
-            reference) ?? factors;
+            gains = horizontalMatchingGains(gains, this._settings.get_value('h-scroll-gains').deep_unpack(), reference);
+        const matched = applyMatchedFactors(factors, this._settings.get_double(global), gains,
+            this._settings.get_strv('matched-apps'), reference);
+        this._settings.set_value(key, new GLib.Variant('a{sd}', matched ?? factors));
+    }
+
+    _setGlobal(axis, value) {
+        this._settings.set_double(AXES[axis].global, value);
+        const factors = this._settings.get_value(AXES[axis].factors).deep_unpack();
+        for (const id of Object.keys(factors))
+            factors[id] = value;
+        this._writeFactors(axis, factors);
+        this._render(axis);
+    }
+
+    _setAppFactor(axis, id, value) {
+        // A hand-set speed stops the app following the scroll reference
+        const matched = this._settings.get_strv('matched-apps');
+        const stillMatched = matched.filter(appId => normalizeAppId(appId) !== normalizeAppId(id));
+        if (stillMatched.length !== matched.length) {
+            this._settings.set_strv('matched-apps', stillMatched);
+            this._toast(_('%s no longer follows the scroll reference').replace('%s', this._appName(id)));
+        }
+        const factors = this._settings.get_value(AXES[axis].factors).deep_unpack();
+        factors[id] = value;
+        this._settings.set_value(AXES[axis].factors, new GLib.Variant('a{sd}', factors));
+        if (isPattern(id))
+            this._render(axis);
+    }
+
+    _reset(axis) {
+        this._setGlobal(axis, 1.0);
+        this._toast(_('%s speeds reset').replace('%s', _(AXES[axis].name)));
+    }
+
+    _copyAxis(axis) {
+        const from = AXES[axis];
+        const to = AXES[from.other];
+        this._settings.set_double(to.global, this._settings.get_double(from.global));
+        this._writeFactors(from.other, this._settings.get_value(from.factors).deep_unpack());
+        this._render(from.other);
+        this._toast(_('Copied to %s').replace('%s', _(to.name)));
+    }
+
+    _addRule(axis, rule) {
+        const error = validatePattern(rule);
+        const factors = this._settings.get_value(AXES[axis].factors).deep_unpack();
+        if (error || Object.hasOwn(factors, rule)) {
+            this._toast(error ? _(error) : _('That rule already exists'));
+            return false;
+        }
+        this._setAppFactor(axis, rule, this._settings.get_double(AXES[axis].global));
+        return true;
+    }
+
+    _removeRule(axis, rule) {
+        const factors = this._settings.get_value(AXES[axis].factors).deep_unpack();
+        delete factors[rule];
+        this._settings.set_value(AXES[axis].factors, new GLib.Variant('a{sd}', factors));
+        this._render(axis);
     }
 
     _appName(appId) {
-        let info = null;
-        for (const id of [appId, normalizeAppId(appId) + '.desktop']) {
-            try {
-                info = Gio.DesktopAppInfo.new(id);
-            } catch {
-                info = null;
-            }
-            if (info) return info.get_name();
-        }
-        return normalizeAppId(appId);
+        const id = normalizeAppId(appId);
+        return this._apps.find(app => app.id === id)?.name ?? id;
     }
 
-    /**
-     * Builds the Calibration group: how to measure apps, the reference app,
-     * and every measured app with a switch to follow the reference. It
-     * re-renders when the extension stores a new measurement.
-     *
-     * @returns {Adw.PreferencesGroup} The group.
-     */
-    createCalibrationGroup() {
+    _buildCalibrationGroup() {
         this._calibrationGroup = new Adw.PreferencesGroup({
             title: _('Calibration'),
             description: _('Match apps to one reference app so a swipe scrolls the same distance everywhere. ' +
                 'To measure an app, open a long page in it, click into it, and choose "Use … as scroll reference" or ' +
-                '"Match …" from the Touchpad Speed tile in Quick Settings (or the panel indicator\'s menu). ' +
-                'For horizontal scrolling, also choose "Measure horizontal scrolling" on something that scrolls sideways ' +
-                '(a wide table, long lines, Files\' column view); apps without it use their vertical ratio for both axes.')
+                '"Match …" in the Touchpad tile\'s menu in Quick Settings. For horizontal scrolling, also choose ' +
+                '"Measure horizontal scrolling" on something that scrolls sideways.'),
         });
-        const clearButton = new Gtk.Button({
-            label: _('Clear'),
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Forget all measurements. Factors stay as they are.')
+        const clear = new Gtk.Button({label: _('Clear'), valign: Gtk.Align.CENTER, css_classes: ['flat'],
+            tooltip_text: _('Forget all measurements. Speeds stay as they are.')});
+        clear.connect('clicked', () => {
+            this._settings.set_strv('matched-apps', []);
+            this._settings.set_string('scroll-reference', '');
+            this._settings.set_value('h-scroll-gains', new GLib.Variant('a{sd}', {}));
+            this._settings.set_value('scroll-gains', new GLib.Variant('a{sd}', {}));
         });
-        clearButton.connect('clicked', () => {
-            this.schema.set_strv('matched-apps', []);
-            this.schema.set_string('scroll-reference', '');
-            this.schema.set_value('h-scroll-gains', new GLib.Variant('a{sd}', {}));
-            this.schema.set_value('scroll-gains', new GLib.Variant('a{sd}', {}));
-        });
-        this._calibrationGroup.set_header_suffix(clearButton);
-        this._calibrationClearButton = clearButton;
+        this._calibrationGroup.set_header_suffix(clear);
+        this._calibrationClear = clear;
         this._calibrationRows = [];
-
-        this._calibrationSignals = ['scroll-gains', 'h-scroll-gains', 'scroll-reference', 'matched-apps'].map(key =>
-            this.schema.connect('changed::' + key, () => this._renderCalibrationRows()));
-        this._renderCalibrationRows();
+        this._calibrationHandlers = ['scroll-gains', 'h-scroll-gains', 'scroll-reference', 'matched-apps']
+            .map(key => this._settings.connect(`changed::${key}`, () => this._renderCalibration()));
+        this._renderCalibration();
         return this._calibrationGroup;
     }
 
-    _renderCalibrationRows() {
-        for (const row of this._calibrationRows) this._calibrationGroup.remove(row);
-        this._calibrationRows = [];
-
-        const gains = this.schema.get_value('scroll-gains').deep_unpack();
-        const hGains = this.schema.get_value('h-scroll-gains').deep_unpack();
-        const reference = this.schema.get_string('scroll-reference');
-        const matched = this.schema.get_strv('matched-apps');
-        const referenceGain = gains[reference];
-        this._calibrationClearButton.sensitive = Object.keys(gains).length + Object.keys(hGains).length > 0;
-
-        const ids = [...new Set([...Object.keys(gains), ...Object.keys(hGains)])].sort((a, b) =>
-            (b === reference) - (a === reference) || this._appName(a).localeCompare(this._appName(b)));
-        if (!ids.length) {
-            const row = new Adw.ActionRow({
-                title: _('No apps measured yet'),
-                css_classes: ['dim-label']
-            });
-            this._calibrationGroup.add(row);
-            this._calibrationRows.push(row);
-            return;
-        }
-
-        for (const id of ids) {
-            const row = new Adw.ActionRow({ title: this._appName(id) });
-            const horizontal = hGains[id]
-                ? (id !== reference && (hGains[reference] ?? referenceGain)
-                    ? _(' · sideways %s× the reference').replace('%s', (hGains[id] / (hGains[reference] ?? referenceGain)).toFixed(2))
-                    : _(' · sideways %s px per unit').replace('%s', hGains[id].toFixed(2)))
-                : '';
-            if (!gains[id]) {
-                // Measured sideways only: it needs a vertical measurement to follow
-                row.subtitle = _('Not measured vertically') + horizontal;
-            } else if (id === reference) {
-                row.subtitle = _('Reference · %s px per unit').replace('%s', gains[id].toFixed(2)) + horizontal;
-            } else {
-                const ratio = referenceGain ? _('%s× the reference · ').replace('%s', (gains[id] / referenceGain).toFixed(2)) : '';
-                row.subtitle = ratio + _('%s px per unit').replace('%s', gains[id].toFixed(2)) + horizontal;
-
-                const referenceButton = new Gtk.Button({
-                    icon_name: 'starred-symbolic',
-                    valign: Gtk.Align.CENTER,
-                    css_classes: ['flat'],
-                    tooltip_text: _('Use as the scroll reference')
-                });
-                referenceButton.connect('clicked', () => {
-                    this.schema.set_strv('matched-apps', this.schema.get_strv('matched-apps').filter(m => m !== id));
-                    this.schema.set_string('scroll-reference', id);
-                });
-                row.add_suffix(referenceButton);
-
-                const follow = new Gtk.Switch({
-                    active: matched.includes(id),
-                    sensitive: !!referenceGain,
-                    valign: Gtk.Align.CENTER,
-                    tooltip_text: _('Follow the reference: set this app\'s factors from its measurement')
-                });
-                follow.connect('notify::active', () => {
-                    const current = this.schema.get_strv('matched-apps').filter(m => m !== id);
-                    if (follow.active) current.push(id);
-                    this.schema.set_strv('matched-apps', current);
-                });
-                row.add_suffix(follow);
-            }
-
-            const forget = new Gtk.Button({
-                icon_name: 'user-trash-symbolic',
-                valign: Gtk.Align.CENTER,
-                css_classes: ['flat'],
-                tooltip_text: _('Forget this measurement')
-            });
-            forget.connect('clicked', () => {
-                const updated = this.schema.get_value('scroll-gains').deep_unpack();
-                const hUpdated = this.schema.get_value('h-scroll-gains').deep_unpack();
-                delete updated[id];
-                delete hUpdated[id];
-                this.schema.set_strv('matched-apps', this.schema.get_strv('matched-apps').filter(m => m !== id));
-                if (this.schema.get_string('scroll-reference') === id) this.schema.set_string('scroll-reference', '');
-                this.schema.set_value('h-scroll-gains', new GLib.Variant('a{sd}', hUpdated));
-                this.schema.set_value('scroll-gains', new GLib.Variant('a{sd}', updated));
-            });
-            row.add_suffix(forget);
-
-            this._calibrationGroup.add(row);
-            this._calibrationRows.push(row);
-        }
-    }
-
-    /**
-     * Disconnects the calibration group's settings signals.
-     */
-    destroy() {
-        for (const id of this._calibrationSignals ?? []) this.schema.disconnect(id);
-        this._calibrationSignals = null;
-    }
-
-    /**
-     * Builds the wildcard rules section for one axis: a short explanation,
-     * the list of rules, and an entry for adding a new rule.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @returns {Gtk.Box} The rules section.
-     */
-    _createRulesBox(axis) {
-        const box = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            spacing: 8,
-            margin_top: 4,
-            margin_bottom: 4,
-            margin_start: 10,
-            margin_end: 10
-        });
-
-        box.append(new Gtk.Label({
-            label: _('Rules'),
-            xalign: 0,
-            css_classes: ['heading']
-        }));
-        box.append(new Gtk.Label({
-            label: _('Give every app whose ID matches a rule the same speed, including apps installed later. ' +
-                '* matches anything, ? one character. Example: brave-* for all Brave web apps. ' +
-                'A speed set for a single app below takes priority.'),
-            xalign: 0,
-            wrap: true,
-            css_classes: ['dim-label']
-        }));
-
-        const ruleListBox = new Gtk.ListBox({
-            selection_mode: Gtk.SelectionMode.NONE,
-            css_classes: ['boxed-list'],
-            visible: false
-        });
-        box.append(ruleListBox);
-
-        const addBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 8
-        });
-        const entry = new Gtk.Entry({
-            placeholder_text: 'brave-*',
-            hexpand: true
-        });
-        const addBtn = new Gtk.Button({
-            label: _('Add Rule'),
-            css_classes: ['suggested-action']
-        });
-        const add = () => {
-            if (this.addRule(axis, entry.get_text())) entry.set_text('');
+    _renderCalibration() {
+        for (const row of this._calibrationRows)
+            this._calibrationGroup.remove(row);
+        const s = this._settings;
+        const gains = s.get_value('scroll-gains').deep_unpack();
+        const hGains = s.get_value('h-scroll-gains').deep_unpack();
+        const reference = s.get_string('scroll-reference');
+        const state = {
+            gains, hGains, reference,
+            matched: s.get_strv('matched-apps'),
+            referenceGain: gains[reference],
+            referenceHorizontal: hGains[reference] ?? gains[reference],
         };
-        addBtn.connect('clicked', add);
-        entry.connect('activate', add);
-        addBox.append(entry);
-        addBox.append(addBtn);
-        box.append(addBox);
 
-        if (axis === 'v') {
-            this.vRuleListBox = ruleListBox;
-        } else {
-            this.hRuleListBox = ruleListBox;
-        }
-        return box;
+        const ids = [...new Set([...Object.keys(gains), ...Object.keys(hGains)])]
+            .sort((a, b) => (b === reference) - (a === reference) || this._appName(a).localeCompare(this._appName(b)));
+        this._calibrationClear.sensitive = ids.length > 0;
+        this._calibrationRows = ids.length
+            ? ids.map(id => this._calibrationRow(id, state))
+            : [new Adw.ActionRow({title: _('No apps measured yet')})];
+        for (const row of this._calibrationRows)
+            this._calibrationGroup.add(row);
     }
 
-    /**
-     * Renders the wildcard rules for the given axis.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @param {Object} [factors] - Factors to show; read from GSettings if omitted.
-     */
-    renderRuleList(axis, factors = null) {
-        const listBox = axis === 'v' ? this.vRuleListBox : this.hRuleListBox;
-        if (!listBox) return;
+    _calibrationRow(id, {gains, hGains, reference, matched, referenceGain, referenceHorizontal}) {
+        const s = this._settings;
+        const parts = [];
+        if (!gains[id])
+            parts.push(_('Not measured vertically'));
+        else if (id === reference)
+            parts.push(_('Reference'), _('%s px per unit').replace('%s', gains[id].toFixed(2)));
+        else if (referenceGain)
+            parts.push(_('%s× the reference').replace('%s', (gains[id] / referenceGain).toFixed(2)), _('%s px per unit').replace('%s', gains[id].toFixed(2)));
+        else
+            parts.push(_('%s px per unit').replace('%s', gains[id].toFixed(2)));
+        if (hGains[id]) {
+            parts.push(id !== reference && referenceHorizontal
+                ? _('sideways %s× the reference').replace('%s', (hGains[id] / referenceHorizontal).toFixed(2))
+                : _('sideways %s px per unit').replace('%s', hGains[id].toFixed(2)));
+        }
+        const row = new Adw.ActionRow({title: this._appName(id), subtitle: parts.join(' · '), use_markup: false});
 
-        while (listBox.get_first_child()) {
-            listBox.remove(listBox.get_first_child());
+        if (gains[id] && id !== reference) {
+            const makeReference = new Gtk.Button({icon_name: 'starred-symbolic', tooltip_text: _('Use as the scroll reference'),
+                valign: Gtk.Align.CENTER, css_classes: ['flat']});
+            makeReference.connect('clicked', () => {
+                s.set_strv('matched-apps', s.get_strv('matched-apps').filter(m => m !== id));
+                s.set_string('scroll-reference', id);
+            });
+            row.add_suffix(makeReference);
+
+            const follow = new Gtk.Switch({active: matched.includes(id), sensitive: !!referenceGain, valign: Gtk.Align.CENTER,
+                tooltip_text: _('Follow the reference')});
+            follow.connect('notify::active', () => {
+                const others = s.get_strv('matched-apps').filter(m => m !== id);
+                s.set_strv('matched-apps', follow.active ? [...others, id] : others);
+            });
+            row.add_suffix(follow);
         }
 
-        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
-        if (!factors) factors = this.schema.get_value(factorsKey).deep_unpack();
-
-        const rules = Object.keys(factors).filter(isPattern).sort();
-        for (const rule of rules) {
-            const pseudoApp = { id: rule, name: rule, icon: 'edit-find-symbolic', exec: '' };
-            listBox.append(this.createAppRow(pseudoApp, factors, axis, () => this.removeRule(axis, rule)));
-        }
-        listBox.set_visible(rules.length > 0);
-    }
-
-    /**
-     * Adds a wildcard rule for the given axis, starting at the current global factor.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @param {string} rule - The rule text, e.g. 'brave-*'.
-     * @returns {boolean} True if the rule was added.
-     */
-    addRule(axis, rule) {
-        const error = validatePattern(rule);
-        if (error) {
-            this._showToast(_(error));
-            return false;
-        }
-
-        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
-        const globalFactorKey = axis === 'v' ? 'global-factor' : 'h-global-factor';
-        const factors = this.schema.get_value(factorsKey).deep_unpack();
-        if (Object.prototype.hasOwnProperty.call(factors, rule)) {
-            this._showToast(_('That rule already exists'));
-            return false;
-        }
-
-        this.updateAppFactor(rule, this.schema.get_double(globalFactorKey), axis);
-        this.renderRuleList(axis);
-        this._showToast(_('Rule added'));
-        return true;
-    }
-
-    /**
-     * Removes a wildcard rule for the given axis.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @param {string} rule - The rule to remove.
-     */
-    removeRule(axis, rule) {
-        const factorsKey = axis === 'v' ? 'app-factors' : 'h-app-factors';
-        const factors = this.schema.get_value(factorsKey).deep_unpack();
-        delete factors[rule];
-        this.schema.set_value(factorsKey, new GLib.Variant('a{sd}', factors));
-        this.renderAppList(axis);
-        this._showToast(_('Rule removed'));
-    }
-
-    /**
-     * Resets all vertical factors to defaults (global = 1.0, all apps = 1.0).
-     */
-    resetVToDefaults() {
-        this._suppressSave = true;
-
-        this.schema.set_double('global-factor', 1.0);
-
-        const factors = this.schema.get_value('app-factors').deep_unpack();
-        for (const appId of Object.keys(factors)) {
-            factors[appId] = 1.0;
-        }
-        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, 1.0, 'v'));
-        this.schema.set_value('app-factors', variant);
-
-        this.renderAppList('v');
-
-        if (this.vFactorLabel) {
-            this.vFactorLabel.set_label('1.00');
-        }
-        if (this.vFactorAdjustment) {
-            this.vFactorAdjustment.set_value(1.0);
-        }
-
-        this._suppressSave = false;
-
-        const toast = new Adw.Toast({
-            title: _('Vertical reset to defaults'),
-            timeout: 2
+        const forget = new Gtk.Button({icon_name: 'user-trash-symbolic', tooltip_text: _('Forget this measurement'),
+            valign: Gtk.Align.CENTER, css_classes: ['flat']});
+        forget.connect('clicked', () => {
+            const without = key => {
+                const values = s.get_value(key).deep_unpack();
+                delete values[id];
+                return new GLib.Variant('a{sd}', values);
+            };
+            s.set_strv('matched-apps', s.get_strv('matched-apps').filter(m => m !== id));
+            if (s.get_string('scroll-reference') === id)
+                s.set_string('scroll-reference', '');
+            s.set_value('h-scroll-gains', without('h-scroll-gains'));
+            s.set_value('scroll-gains', without('scroll-gains'));
         });
-        this._window.add_toast(toast);
+        row.add_suffix(forget);
+        return row;
     }
 
-    /**
-     * Resets all horizontal factors to defaults (global = 1.0, all apps = 1.0).
-     */
-    resetHToDefaults() {
-        this._suppressSave = true;
-
-        this.schema.set_double('h-global-factor', 1.0);
-
-        const factors = this.schema.get_value('h-app-factors').deep_unpack();
-        for (const appId of Object.keys(factors)) {
-            factors[appId] = 1.0;
-        }
-        const variant = new GLib.Variant('a{sd}', this._withMatchedFactors(factors, 1.0, 'h'));
-        this.schema.set_value('h-app-factors', variant);
-
-        this.renderAppList('h');
-
-        if (this.hFactorLabel) {
-            this.hFactorLabel.set_label('1.00');
-        }
-        if (this.hFactorAdjustment) {
-            this.hFactorAdjustment.set_value(1.0);
-        }
-
-        this._suppressSave = false;
-
-        const toast = new Adw.Toast({
-            title: _('Horizontal reset to defaults'),
-            timeout: 2
-        });
-        this._window.add_toast(toast);
-    }
-
-    /**
-     * Syncs all vertical factors to horizontal.
-     *
-     * Copies app-factors and global-factor from vertical to horizontal.
-     * Uses renderAppListWithFactors() with direct data to avoid GSettings cache staleness.
-     * Uses _suppressSave to prevent the horizontal slider's value-changed handler
-     * from overwriting the synced per-app values.
-     */
-    syncVToH() {
-        this._suppressSave = true;
-
-        const vFactors = this.schema.get_value('app-factors').deep_unpack();
-        const vGlobal = this.schema.get_double('global-factor');
-
-        const variant = new GLib.Variant('a{sd}', vFactors);
-        this.schema.set_value('h-app-factors', variant);
-        this.schema.set_double('h-global-factor', vGlobal);
-
-        this.hFilteredApps = this.apps.slice();
-        this.renderAppListWithFactors('h', vFactors, vGlobal);
-
-        if (this.hFactorLabel) {
-            this.hFactorLabel.set_label(vGlobal.toFixed(2));
-        }
-        if (this.hFactorAdjustment) {
-            this.hFactorAdjustment.set_value(vGlobal);
-        }
-
-        this._suppressSave = false;
-
-        const toast = new Adw.Toast({
-            title: _('Synced vertical to horizontal'),
-            timeout: 2
-        });
-        this._window.add_toast(toast);
-    }
-
-    /**
-     * Syncs all horizontal factors to vertical.
-     *
-     * Copies h-app-factors and h-global-factor from horizontal to vertical.
-     * Uses the same direct-data rendering approach as syncVToH().
-     */
-    syncHToV() {
-        this._suppressSave = true;
-
-        const hFactors = this.schema.get_value('h-app-factors').deep_unpack();
-        const hGlobal = this.schema.get_double('h-global-factor');
-
-        const variant = new GLib.Variant('a{sd}', hFactors);
-        this.schema.set_value('app-factors', variant);
-        this.schema.set_double('global-factor', hGlobal);
-
-        this.vFilteredApps = this.apps.slice();
-        this.renderAppListWithFactors('v', hFactors, hGlobal);
-
-        if (this.vFactorLabel) {
-            this.vFactorLabel.set_label(hGlobal.toFixed(2));
-        }
-        if (this.vFactorAdjustment) {
-            this.vFactorAdjustment.set_value(hGlobal);
-        }
-
-        this._suppressSave = false;
-
-        const toast = new Adw.Toast({
-            title: _('Synced horizontal to vertical'),
-            timeout: 2
-        });
-        this._window.add_toast(toast);
-    }
-
-    /**
-     * Renders the app list using pre-resolved factor data.
-     *
-     * This method is used during sync operations to avoid re-reading from GSettings,
-     * which may return stale data due to caching. The factors dictionary and global
-     * factor are passed directly from the source axis.
-     *
-     * @param {string} axis - 'v' for vertical, 'h' for horizontal.
-     * @param {Object} factors - The source per-app factors dictionary.
-     * @param {number} globalFactor - The source global factor value.
-     */
-    renderAppListWithFactors(axis, factors, globalFactor) {
-        const listBox = axis === 'v' ? this.vListBox : this.hListBox;
-
-        while (listBox.get_first_child()) {
-            listBox.remove(listBox.get_first_child());
-        }
-
-        const apps = axis === 'v' ? this.vFilteredApps : this.hFilteredApps;
-
-        for (const app of apps) {
-            const row = this.createAppRow(app, factors, axis, null, globalFactor);
-            listBox.append(row);
-        }
-        this.renderRuleList(axis, factors);
-    }
-
-    /**
-     * Opens a save dialog and exports all settings to a JSON file.
-     * Uses Gtk.FileDialog (GTK 4.10+, available on GNOME 45+).
-     */
-    _exportSettings() {
-        const dialog = new Gtk.FileDialog();
-        dialog.set_title(_('Export Settings'));
-        dialog.set_initial_name('touchpad-speed-control-settings.json');
-
-        const filter = new Gtk.FileFilter();
-        filter.set_name(_('JSON Files'));
-        filter.add_pattern('*.json');
-        dialog.set_default_filter(filter);
-
+    _export() {
+        const s = this._settings;
         const data = {
             version: 1,
-            vertical: {
-                global_factor: this.schema.get_double('global-factor'),
-                app_factors: this.schema.get_value('app-factors').deep_unpack()
-            },
-            horizontal: {
-                global_factor: this.schema.get_double('h-global-factor'),
-                app_factors: this.schema.get_value('h-app-factors').deep_unpack()
-            },
+            vertical: {global_factor: s.get_double('global-factor'), app_factors: s.get_value('app-factors').deep_unpack()},
+            horizontal: {global_factor: s.get_double('h-global-factor'), app_factors: s.get_value('h-app-factors').deep_unpack()},
             calibration: {
-                gains: this.schema.get_value('scroll-gains').deep_unpack(),
-                horizontal_gains: this.schema.get_value('h-scroll-gains').deep_unpack(),
-                reference: this.schema.get_string('scroll-reference'),
-                matched: this.schema.get_strv('matched-apps')
-            }
+                gains: s.get_value('scroll-gains').deep_unpack(),
+                horizontal_gains: s.get_value('h-scroll-gains').deep_unpack(),
+                reference: s.get_string('scroll-reference'),
+                matched: s.get_strv('matched-apps'),
+            },
         };
-
-        const json = JSON.stringify(data, null, 2);
-        const encoder = new TextEncoder();
-        const uint8array = encoder.encode(json);
-        const bytes = new GLib.Bytes(uint8array);
-
-        dialog.save(this._window, null, (self, result) => {
+        const dialog = new Gtk.FileDialog({title: _('Export Settings'), initial_name: 'touchpad-speed-control-settings.json'});
+        dialog.save(this._window, null, (d, result) => {
+            let file;
             try {
-                const file = self.save_finish(result);
-                file.replace_contents_bytes_async(bytes, null, false, Gio.FileCreateFlags.NONE, null, (file, result) => {
-                    try {
-                        file.replace_contents_finish(result);
-                        this._showToast(_('Settings exported'));
-                    } catch (e) {
-                        this._showToast(_('Failed to export settings'));
-                    }
-                });
-            } catch (e) {
-                // User cancelled — ignore
+                file = d.save_finish(result);
+            } catch {
+                return; // cancelled
             }
+            const bytes = new GLib.Bytes(new TextEncoder().encode(JSON.stringify(data, null, 2)));
+            file.replace_contents_bytes_async(bytes, null, false, Gio.FileCreateFlags.NONE, null, (f, res) => {
+                try {
+                    f.replace_contents_finish(res);
+                    this._toast(_('Settings exported'));
+                } catch {
+                    this._toast(_('Failed to export settings'));
+                }
+            });
         });
     }
 
-    /**
-     * Opens a file dialog and imports settings from a JSON file.
-     * Overwrites all current settings. Validates file format before applying.
-     */
-    _importSettings() {
-        const dialog = new Gtk.FileDialog();
-        dialog.set_title(_('Import Settings'));
-
-        const filter = new Gtk.FileFilter();
-        filter.set_name(_('JSON Files'));
-        filter.add_pattern('*.json');
-        dialog.set_default_filter(filter);
-
-        dialog.open(this._window, null, (self, result) => {
+    _import() {
+        const dialog = new Gtk.FileDialog({title: _('Import Settings')});
+        dialog.open(this._window, null, (d, result) => {
+            let file;
             try {
-                const file = self.open_finish(result);
-                file.load_contents_async(null, (file, result) => {
-                    try {
-                        const [success, contents] = file.load_contents_finish(result);
-                        if (!success || !contents) {
-                            this._showToast(_('Could not read file'));
-                            return;
-                        }
-
-                        const decoder = new TextDecoder();
-                        const text = decoder.decode(contents);
-                        let data;
-                        try {
-                            data = JSON.parse(text);
-                        } catch (e) {
-                            this._showToast(_('Invalid JSON file'));
-                            return;
-                        }
-
-                        if (!data || data.version !== 1 || !data.vertical || !data.horizontal) {
-                            this._showToast(_('Invalid file format'));
-                            return;
-                        }
-
-                        this._suppressSave = true;
-
-                        if (typeof data.vertical.global_factor === 'number') {
-                            this.schema.set_double('global-factor', data.vertical.global_factor);
-                        }
-                        if (data.vertical.app_factors && typeof data.vertical.app_factors === 'object') {
-                            const installedAppIds = new Set(this.apps.map(a => a.id));
-                            const filtered = {};
-                            for (const [appId, factor] of Object.entries(data.vertical.app_factors)) {
-                                if (installedAppIds.has(appId) || isPattern(appId)) {
-                                    filtered[appId] = factor;
-                                }
-                            }
-                            const vVariant = new GLib.Variant('a{sd}', filtered);
-                            this.schema.set_value('app-factors', vVariant);
-                        }
-
-                        if (typeof data.horizontal.global_factor === 'number') {
-                            this.schema.set_double('h-global-factor', data.horizontal.global_factor);
-                        }
-                        if (data.horizontal.app_factors && typeof data.horizontal.app_factors === 'object') {
-                            const installedAppIds = new Set(this.apps.map(a => a.id));
-                            const filtered = {};
-                            for (const [appId, factor] of Object.entries(data.horizontal.app_factors)) {
-                                if (installedAppIds.has(appId) || isPattern(appId)) {
-                                    filtered[appId] = factor;
-                                }
-                            }
-                            const hVariant = new GLib.Variant('a{sd}', filtered);
-                            this.schema.set_value('h-app-factors', hVariant);
-                        }
-
-                        // Files exported before calibration existed have no section;
-                        // keep the current calibration then
-                        const calibration = calibrationFromJson(data.calibration);
-                        if (calibration) {
-                            this.schema.set_value('scroll-gains', new GLib.Variant('a{sd}', calibration.gains));
-                            this.schema.set_value('h-scroll-gains', new GLib.Variant('a{sd}', calibration.horizontalGains));
-                            this.schema.set_string('scroll-reference', calibration.reference);
-                            this.schema.set_strv('matched-apps', calibration.matched);
-                        }
-
-                        this.refreshAppList();
-
-                        if (this.vFactorLabel) {
-                            this.vFactorLabel.set_label(data.vertical.global_factor.toFixed(2));
-                        }
-                        if (this.vFactorAdjustment) {
-                            this.vFactorAdjustment.set_value(data.vertical.global_factor);
-                        }
-                        if (this.hFactorLabel) {
-                            this.hFactorLabel.set_label(data.horizontal.global_factor.toFixed(2));
-                        }
-                        if (this.hFactorAdjustment) {
-                            this.hFactorAdjustment.set_value(data.horizontal.global_factor);
-                        }
-
-                        this._suppressSave = false;
-
-                        this._showToast(_('Settings imported'));
-                    } catch (e) {
-                        this._showToast(_('Failed to read file'));
-                    }
-                });
-            } catch (e) {
-                // User cancelled — ignore
+                file = d.open_finish(result);
+            } catch {
+                return; // cancelled
             }
-        });
-    }
+            file.load_contents_async(null, (f, res) => {
+                let data;
+                try {
+                    data = JSON.parse(new TextDecoder().decode(f.load_contents_finish(res)[1]));
+                } catch {
+                    this._toast(_('Could not read the file'));
+                    return;
+                }
+                if (data?.version !== 1 || !data.vertical || !data.horizontal) {
+                    this._toast(_('Invalid file format'));
+                    return;
+                }
 
-    /**
-     * Shows a brief notification toast in the preferences window.
-     *
-     * @param {string} message - The message to display.
-     */
-    _showToast(message) {
-        const toast = new Adw.Toast({
-            title: message,
-            timeout: 3
+                // Rules and installed apps only
+                const installed = new Set(this._apps.map(app => app.id));
+                for (const [axis, section] of [['v', data.vertical], ['h', data.horizontal]]) {
+                    if (typeof section.global_factor === 'number')
+                        this._settings.set_double(AXES[axis].global, section.global_factor);
+                    if (section.app_factors && typeof section.app_factors === 'object') {
+                        const factors = Object.fromEntries(Object.entries(section.app_factors)
+                            .filter(([id, factor]) => typeof factor === 'number' && (installed.has(id) || isPattern(id))));
+                        this._settings.set_value(AXES[axis].factors, new GLib.Variant('a{sd}', factors));
+                    }
+                }
+                // Files from older versions have no calibration; keep the current one
+                const calibration = calibrationFromJson(data.calibration);
+                if (calibration) {
+                    this._settings.set_value('scroll-gains', new GLib.Variant('a{sd}', calibration.gains));
+                    this._settings.set_value('h-scroll-gains', new GLib.Variant('a{sd}', calibration.horizontalGains));
+                    this._settings.set_string('scroll-reference', calibration.reference);
+                    this._settings.set_strv('matched-apps', calibration.matched);
+                }
+                this._render('v');
+                this._render('h');
+                this._toast(_('Settings imported'));
+            });
         });
-        this._window.add_toast(toast);
-    }
-
-    /**
-     * Re-filters and re-renders both axis app lists.
-     * Useful after external changes to GSettings.
-     */
-    refreshAppList() {
-        this.filterApps('v');
-        this.filterApps('h');
     }
 }
