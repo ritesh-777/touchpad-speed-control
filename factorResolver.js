@@ -180,12 +180,14 @@ export function applyMatchedFactors(factors, globalFactor, gains, matched, refer
 }
 
 /**
- * Gains to match the horizontal axis with. An app measured horizontally,
- * with a horizontally measured reference, uses its horizontal ratio to the
- * reference, expressed on the reference's vertical gain so it can be passed
- * to applyMatchedFactors with the same gains dictionary. Every other app
- * keeps its vertical gain, so its horizontal factor follows the vertical
- * ratio.
+ * Gains to match the horizontal axis with. An app measured horizontally
+ * uses its horizontal ratio to the reference, expressed on the reference's
+ * vertical gain so it can be passed to applyMatchedFactors with the same
+ * gains dictionary. A reference without a horizontal measurement is taken to
+ * scroll as far sideways as vertically, which holds for ordinary apps (and
+ * the reference is usually a plain text or file view). Every app without a
+ * horizontal measurement keeps its vertical gain, so its horizontal factor
+ * follows the vertical ratio.
  *
  * @param {Object<string, number>} gains - Vertical gains by app ID.
  * @param {Object<string, number>} horizontalGains - Horizontal gains by app ID.
@@ -195,8 +197,8 @@ export function applyMatchedFactors(factors, globalFactor, gains, matched, refer
 export function horizontalMatchingGains(gains, horizontalGains, reference) {
     const result = {...gains};
     const referenceGain = gains[reference];
-    const referenceHorizontal = horizontalGains[reference];
-    if (!referenceGain || !referenceHorizontal) return result;
+    const referenceHorizontal = horizontalGains[reference] ?? referenceGain;
+    if (!referenceGain) return result;
     for (const [appId, gain] of Object.entries(horizontalGains)) {
         if (appId !== reference && gain > 0)
             result[appId] = gain * referenceGain / referenceHorizontal;

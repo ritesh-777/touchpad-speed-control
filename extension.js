@@ -29,10 +29,6 @@ import { measureWindowGain } from './calibration.js';
 import { applyMatchedFactors, horizontalMatchingGains, resolveFactor } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
 
-// A horizontal measurement this many times faster or slower than the app's
-// vertical one is rejected as not a real sideways scroll
-const MAX_AXIS_RATIO = 3;
-
 // Verbose logging, controlled by the debug-logging setting (General tab)
 let debugLogging = false;
 
@@ -686,9 +682,8 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
     /**
      * Measures the focused app's horizontal scroll gain. Optional: a matched
-     * app measured horizontally (with a reference measured horizontally too)
-     * gets its horizontal factor from the horizontal ratio instead of the
-     * vertical one.
+     * app measured horizontally gets its horizontal factor from its
+     * horizontal ratio to the reference instead of the vertical one.
      */
     async _calibrateHorizontal() {
         const app = this._calibrationApp();
@@ -711,36 +706,33 @@ export default class TouchpadSpeedControlExtension extends Extension {
             const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line), saveDir, false);
             if (!this._settings) return;
 
-            // Apps scroll about as far sideways as vertically. A far larger or
-            // smaller result means something else moved: a sideways swipe that
-            // navigated back or forward, or a grid of identical icons lining up.
             const gains = this._settings.get_value('scroll-gains').deep_unpack();
-            const ratio = gains[appId] ? result.gain / gains[appId] : 1;
-            if (ratio > MAX_AXIS_RATIO || ratio < 1 / MAX_AXIS_RATIO) {
-                throw new Error(`it moved ${result.gain.toFixed(1)} px per unit sideways but ${gains[appId].toFixed(1)} vertically, ` +
-                    'so the content probably changed instead of scrolling; try a wide table, long lines or a zoomed image');
-            }
-
             const hGains = this._settings.get_value('h-scroll-gains').deep_unpack();
             hGains[appId] = result.gain;
             this._settings.set_value('h-scroll-gains', new GLib.Variant('a{sd}', hGains));
             log('Calibrate ' + appId + ': horizontal gain ' + result.gain.toFixed(3));
 
             const reference = this._settings.get_string('scroll-reference');
+            // Some views scroll much faster sideways than down (Files' column
+            // view, for one); say so, since that is why its factors differ
+            const axisNote = gains[appId] && Math.abs(Math.log(result.gain / gains[appId])) > Math.log(1.5)
+                ? ` That is ${(result.gain / gains[appId]).toFixed(1)}× its vertical speed.`
+                : '';
             let detail;
             if (appId === reference) {
-                detail = 'Matched apps measured horizontally now use their horizontal ratio.';
-            } else if (!hGains[reference]) {
-                detail = `Measure ${this._appName(reference) || 'the reference app'} horizontally too to use it.`;
+                detail = 'Matched apps measured sideways now use their horizontal ratio.';
+            } else if (!gains[reference]) {
+                detail = 'Set a scroll reference to use it.';
             } else {
-                detail = `${(result.gain / hGains[reference]).toFixed(2)}× as far as ${this._appName(reference)}.`;
+                const referenceGain = hGains[reference] ?? gains[reference];
+                detail = `${(result.gain / referenceGain).toFixed(2)}× as far as ${this._appName(reference)}.`;
                 if (this._settings.get_strv('matched-apps').includes(appId))
                     detail += ` Horizontal factor set to ${this._resolveFactor('h', appId).toFixed(2)}.`;
                 else if (!gains[appId])
                     detail += ' Match it (vertically) to make it follow the reference.';
             }
             this._showNotification('Horizontal scrolling measured',
-                `${name} scrolls ${result.gain.toFixed(2)} px per unit sideways. ${detail}`);
+                `${name} scrolls ${result.gain.toFixed(2)} px per unit sideways.${axisNote} ${detail}`);
         } catch (e) {
             logError('Horizontal calibration failed for ' + appId + ': ' + e.message);
             this._showNotification('Calibration failed', `${name}: ${e.message}`);

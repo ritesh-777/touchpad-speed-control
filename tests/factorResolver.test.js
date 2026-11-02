@@ -109,8 +109,13 @@ check('input dictionary is not modified', input, {'zotero': 1.0});
 // horizontalMatchingGains
 const hRef = 'org.gnome.TextEditor.desktop';
 const vGains = {[hRef]: 2.0, 'google-chrome.desktop': 13.0, 'zotero.desktop': 4.0};
-check('no horizontal reference: vertical gains unchanged',
-    horizontalMatchingGains(vGains, {'google-chrome.desktop': 20.0}, hRef), vGains);
+check('reference not measured sideways: taken to scroll as far sideways as vertically',
+    horizontalMatchingGains(vGains, {'google-chrome.desktop': 20.0}, hRef)['google-chrome.desktop'], 20.0);
+check('a view far faster sideways (Files column view) gets a small horizontal factor, clamped by WSF',
+    applyMatchedFactors({}, 0.45, horizontalMatchingGains({[hRef]: 2.0, 'files.desktop': 4.0}, {'files.desktop': 100.0}, hRef),
+        ['files.desktop'], hRef), {'files': 0.05});
+check('no reference: gains unchanged',
+    horizontalMatchingGains(vGains, {'google-chrome.desktop': 20.0}, 'missing.desktop'), vGains);
 const hGains = horizontalMatchingGains(vGains, {[hRef]: 4.0, 'google-chrome.desktop': 20.0}, hRef);
 check('horizontal ratio is used when both are measured (5x reference -> 10 on its 2.0 scale)',
     hGains['google-chrome.desktop'], 10.0);

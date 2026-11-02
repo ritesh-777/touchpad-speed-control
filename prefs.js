@@ -1225,8 +1225,8 @@ class Settings {
             description: _('Match apps to one reference app so a swipe scrolls the same distance everywhere. ' +
                 'To measure an app, turn on the panel indicator (below), open a long page in the app, click into it, ' +
                 'and choose "Use … as scroll reference" or "Match …" from the indicator\'s menu. ' +
-                'For horizontal scrolling, also choose "Measure horizontal scrolling" on something that scrolls sideways; ' +
-                'apps without it use their vertical ratio for both axes.')
+                'For horizontal scrolling, also choose "Measure horizontal scrolling" on something that scrolls sideways ' +
+                '(a wide table, long lines, Files\' column view); apps without it use their vertical ratio for both axes.')
         });
         const clearButton = new Gtk.Button({
             label: _('Clear'),
@@ -1276,8 +1276,8 @@ class Settings {
         for (const id of ids) {
             const row = new Adw.ActionRow({ title: this._appName(id) });
             const horizontal = hGains[id]
-                ? (id !== reference && hGains[reference]
-                    ? _(' · sideways %s× the reference').replace('%s', (hGains[id] / hGains[reference]).toFixed(2))
+                ? (id !== reference && (hGains[reference] ?? referenceGain)
+                    ? _(' · sideways %s× the reference').replace('%s', (hGains[id] / (hGains[reference] ?? referenceGain)).toFixed(2))
                     : _(' · sideways %s px per unit').replace('%s', hGains[id].toFixed(2)))
                 : '';
             if (!gains[id]) {
