@@ -284,25 +284,62 @@ export default class TouchpadSpeedControlExtension extends Extension {
     _showIndicator() {
         if (this._indicator)
             return;
-        this._indicator = new PanelMenu.Button(0.0, 'TouchpadSpeedIndicator', true);
+        this._indicator = new PanelMenu.Button(0.0, 'TouchpadSpeedIndicator');
         this._indicatorLabel = new St.Label({text: 'V: -  H: -', y_align: Clutter.ActorAlign.CENTER});
         this._indicator.add_child(this._indicatorLabel);
+        this._indicatorHandlers = [];
+        const menu = this._indicator.menu;
+        this._indicatorItems = this._addCalibrationItems(menu, this._indicatorHandlers);
+        this._connect(this._indicatorHandlers, menu, 'open-state-changed',
+            (m, open) => open && this._updateCalibrationItems(this._indicatorItems));
         Main.panel.addToStatusArea('touchpad-speed-indicator', this._indicator, 1, 'right');
         this._applied = null;
         this._handleChange();
     }
 
     _hideIndicator() {
-        this._indicator?.destroy();
+        if (!this._indicator)
+            return;
+        for (const [object, id] of this._indicatorHandlers)
+            object.disconnect(id);
+        this._indicatorHandlers = null;
+        this._indicator.destroy();
         this._indicator = null;
         this._indicatorLabel = null;
+        this._indicatorItems = null;
+    }
+
+    _connect(handlers, object, signal, callback) {
+        handlers.push([object, object.connect(signal, callback)]);
+    }
+
+    _addCalibrationItems(menu, handlers) {
+        const items = {};
+        for (const mode of ['reference', 'match', 'horizontal']) {
+            items[mode] = new PopupMenu.PopupMenuItem('');
+            this._connect(handlers, items[mode], 'activate', () => this._calibrate(mode));
+            menu.addMenuItem(items[mode]);
+        }
+        return items;
+    }
+
+    _updateCalibrationItems(items) {
+        const app = this._focusedApp();
+        const name = app?.get_name();
+        const reference = this._settings.get_string('scroll-reference');
+        items.reference.label.text = name ? `Use ${name} as scroll reference` : 'Focus an app window to calibrate';
+        items.match.label.text = reference ? `Match ${name ?? 'focused app'} to ${this._appName(reference)}` : 'Set a scroll reference first';
+        items.horizontal.label.text = `Measure horizontal scrolling${name ? ` of ${name}` : ''}`;
+        items.reference.setSensitive(!!app && !this._calibrating);
+        items.match.setSensitive(!!app && !!reference && app.get_id() !== reference && !this._calibrating);
+        items.horizontal.setSensitive(!!app && !this._calibrating);
     }
 
     _showQuickSettings() {
         if (this._quickIndicator)
             return;
         this._quickHandlers = [];
-        const on = (object, signal, callback) => this._quickHandlers.push([object, object.connect(signal, callback)]);
+        const on = (object, signal, callback) => this._connect(this._quickHandlers, object, signal, callback);
 
         // Not a toggle: clicking opens the preferences, the arrow opens the menu
         this._quickToggle = new QuickSettings.QuickMenuToggle({
@@ -337,13 +374,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
         });
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._calibrationItems = {};
-        for (const mode of ['reference', 'match', 'horizontal']) {
-            const item = new PopupMenu.PopupMenuItem('');
-            on(item, 'activate', () => this._calibrate(mode));
-            menu.addMenuItem(item);
-            this._calibrationItems[mode] = item;
-        }
+        this._calibrationItems = this._addCalibrationItems(menu, this._quickHandlers);
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         const settingsItem = new PopupMenu.PopupMenuItem('Touchpad Speed Settings');
         on(settingsItem, 'activate', openPreferences);
@@ -388,23 +419,13 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
     _updateQuickMenu() {
         const app = this._focusedApp();
-        const name = app?.get_name();
-        this._quickToggle.menu.setHeader('input-touchpad-symbolic', 'Touchpad Speed', name ?? 'No app window focused');
-
+        this._quickToggle.menu.setHeader('input-touchpad-symbolic', 'Touchpad Speed', app?.get_name() ?? 'No app window focused');
         for (const {axis, row} of this._factorRows) {
             row.value.text = app ? this._resolveFactor(axis, app.get_id()).toFixed(2) : '-';
             for (const button of row.buttons)
                 button.reactive = !!app;
         }
-
-        const reference = this._settings.get_string('scroll-reference');
-        const items = this._calibrationItems;
-        items.reference.label.text = name ? `Use ${name} as scroll reference` : 'Focus an app window to calibrate';
-        items.match.label.text = reference ? `Match ${name ?? 'focused app'} to ${this._appName(reference)}` : 'Set a scroll reference first';
-        items.horizontal.label.text = `Measure horizontal scrolling${name ? ` of ${name}` : ''}`;
-        items.reference.setSensitive(!!app && !this._calibrating);
-        items.match.setSensitive(!!app && !!reference && app.get_id() !== reference && !this._calibrating);
-        items.horizontal.setSensitive(!!app && !this._calibrating);
+        this._updateCalibrationItems(this._calibrationItems);
     }
 
     // Like the preferences' − / + buttons; a hand-set factor stops the app
@@ -434,6 +455,7 @@ export default class TouchpadSpeedControlExtension extends Extension {
 
         this._calibrating = true;
         Main.panel.closeQuickSettings();
+        this._indicator?.menu.close();
         try {
             // Let the menu close and release its grab before scrolling
             await wait(300);
