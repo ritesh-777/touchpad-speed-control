@@ -118,7 +118,9 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 |------|---------|
 | `extension.js` | GNOME Shell-side logic: window detection, factor resolution, WSF communication |
 | `prefs.js` | Preferences UI: settings panels, app discovery, GSettings binding |
-| `factorResolver.js` | Chooses an app's speed: exact ID, wildcard rules, partial match, global (shared, unit tested) |
+| `factorResolver.js` | Chooses an app's speed: exact ID, wildcard rules, partial match, global; matched-app factors from calibration (shared, unit tested) |
+| `calibration.js` | Measures how far an app scrolls per unit of touchpad scroll (GNOME Shell only) |
+| `scrollShift.js` | Finds how far content moved between two captures (unit tested) |
 | `wsf.js` | Finds the `wsf` binary and reads `wsf status` (shared) |
 | `tests/` | Unit tests, run with `gjs -m` |
 | `schemas/*.gschema.xml` | GSettings schema definition |
@@ -170,10 +172,11 @@ _resolveFactor(axis, appId) {
 
 ## Testing Changes
 
-Run the unit tests for the speed-matching logic (needs `gjs`, installed with GNOME):
+Run the unit tests for the speed-matching and calibration logic (needs `gjs`, installed with GNOME):
 
 ```bash
 gjs -m tests/factorResolver.test.js
+gjs -m tests/scrollShift.test.js
 ```
 
 Then test in GNOME Shell:

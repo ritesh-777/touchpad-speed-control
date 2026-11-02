@@ -130,6 +130,111 @@ export function resolveFactor(factors, appId, globalFactor) {
     return {factor: globalFactor, source: 'global', key: null};
 }
 
+/**
+ * Factor that makes an app scroll as far per swipe as the reference app.
+ *
+ * Calibration measures each app's gain (logical pixels scrolled per unit of
+ * touchpad scroll, before any factor). Two apps feel the same when
+ * gain × factor is the same for both.
+ *
+ * @param {number} appGain - Measured gain of the app.
+ * @param {number} referenceGain - Measured gain of the reference app.
+ * @param {number} referenceFactor - Factor the reference app uses.
+ * @returns {number} The matching factor, rounded to 0.01 and clamped to
+ *   WSF's 0.05–5.0 range.
+ */
+export function factorForGain(appGain, referenceGain, referenceFactor) {
+    const factor = (referenceGain * referenceFactor) / appGain;
+    return Math.min(5.0, Math.max(0.05, Math.round(factor * 100) / 100));
+}
+
+/**
+ * Sets the factor of every matched app so it scrolls like the reference app
+ * at the reference's current factor (one axis).
+ *
+ * @param {Object<string, number>} factors - The app-factors dictionary.
+ * @param {number} globalFactor - The global factor.
+ * @param {Object<string, number>} gains - Measured gains by app ID.
+ * @param {string[]} matched - App IDs that follow the reference.
+ * @param {string} reference - The reference app ID.
+ * @returns {Object<string, number>|null} An updated copy of `factors`, or null
+ *   if nothing needs to change (or there is no measured reference).
+ */
+export function applyMatchedFactors(factors, globalFactor, gains, matched, reference) {
+    const referenceGain = gains[reference];
+    if (!reference || !referenceGain) return null;
+
+    const referenceFactor = resolveFactor(factors, reference, globalFactor).factor;
+    const updated = {...factors};
+    let changed = false;
+    for (const appId of matched) {
+        if (appId === reference || !gains[appId]) continue;
+        const key = normalizeAppId(appId);
+        const factor = factorForGain(gains[appId], referenceGain, referenceFactor);
+        if (updated[key] !== factor) {
+            updated[key] = factor;
+            changed = true;
+        }
+    }
+    return changed ? updated : null;
+}
+
+/**
+ * Gains to match the horizontal axis with. An app measured horizontally
+ * uses its horizontal ratio to the reference, expressed on the reference's
+ * vertical gain so it can be passed to applyMatchedFactors with the same
+ * gains dictionary. A reference without a horizontal measurement is taken to
+ * scroll as far sideways as vertically, which holds for ordinary apps (and
+ * the reference is usually a plain text or file view). Every app without a
+ * horizontal measurement keeps its vertical gain, so its horizontal factor
+ * follows the vertical ratio.
+ *
+ * @param {Object<string, number>} gains - Vertical gains by app ID.
+ * @param {Object<string, number>} horizontalGains - Horizontal gains by app ID.
+ * @param {string} reference - The reference app ID.
+ * @returns {Object<string, number>} Gains for the horizontal axis.
+ */
+export function horizontalMatchingGains(gains, horizontalGains, reference) {
+    const result = {...gains};
+    const referenceGain = gains[reference];
+    const referenceHorizontal = horizontalGains[reference] ?? referenceGain;
+    if (!referenceGain) return result;
+    for (const [appId, gain] of Object.entries(horizontalGains)) {
+        if (appId !== reference && gain > 0)
+            result[appId] = gain * referenceGain / referenceHorizontal;
+    }
+    return result;
+}
+
+/**
+ * Reads the calibration section of an exported settings file, keeping only
+ * well-formed entries (positive gains, string IDs).
+ *
+ * @param {*} section - The `calibration` value from the JSON file.
+ * @returns {{gains: Object<string, number>, horizontalGains: Object<string, number>,
+ *   reference: string, matched: string[]}|null} The calibration, or null if
+ *   the section is missing or not an object.
+ */
+export function calibrationFromJson(section) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return null;
+
+    const gainsFrom = value => {
+        const gains = {};
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            for (const [appId, gain] of Object.entries(value)) {
+                if (typeof gain === 'number' && Number.isFinite(gain) && gain > 0) gains[appId] = gain;
+            }
+        }
+        return gains;
+    };
+    const gains = gainsFrom(section.gains);
+    const reference = typeof section.reference === 'string' && gains[section.reference] ? section.reference : '';
+    const matched = Array.isArray(section.matched)
+        ? [...new Set(section.matched.filter(id => typeof id === 'string' && gains[id] && id !== reference))]
+        : [];
+    return {gains, horizontalGains: gainsFrom(section.horizontal_gains), reference, matched};
+}
+
 function _literalLength(pattern) {
     return pattern.replace(/[*?]/g, '').length;
 }
