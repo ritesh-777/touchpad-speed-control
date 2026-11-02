@@ -1,6 +1,6 @@
 // Unit tests for factorResolver.js. Run with: gjs -m tests/factorResolver.test.js
 
-import {isPattern, matchesPattern, normalizeAppId, resolveFactor, validatePattern} from '../factorResolver.js';
+import {applyMatchedFactors, factorForGain, isPattern, matchesPattern, normalizeAppId, resolveFactor, validatePattern} from '../factorResolver.js';
 
 let failures = 0;
 let count = 0;
@@ -75,6 +75,36 @@ const backward = {'b': 0.3, 'ab*': 0.2, 'a*': 0.1};
 check('order independent', resolve(forward, 'abc'), resolve(backward, 'abc'));
 check('? is more specific than *', resolve({'x?z': 0.1, 'x*z': 0.2}, 'xyz'), [0.1, 'pattern', 'x?z']);
 check('tie broken alphabetically', resolve({'b*': 0.1, 'a*': 0.2, '*c': 0.3}, 'abc'), [0.3, 'pattern', '*c']);
+
+// factorForGain: gain × factor is kept equal to the reference's
+check('Chrome matched to Text Editor at 0.45', factorForGain(13.17, 2.0, 0.45), 0.07);
+check('same gain keeps the reference factor', factorForGain(2.0, 2.0, 0.45), 0.45);
+check('clamped to the WSF minimum', factorForGain(500, 2.0, 0.1), 0.05);
+check('clamped to the WSF maximum', factorForGain(0.1, 2.0, 1.0), 5.0);
+
+// applyMatchedFactors
+const gains = {'org.gnome.TextEditor.desktop': 2.0, 'google-chrome.desktop': 13.17, 'zotero.desktop': 4.0};
+const ref = 'org.gnome.TextEditor.desktop';
+check('matched apps follow the reference (stored without .desktop)',
+    applyMatchedFactors({'google-chrome': 1.0}, 0.45, gains, ['google-chrome.desktop', 'zotero.desktop'], ref),
+    {'google-chrome': 0.07, 'zotero': 0.23});
+check('reference uses its own factor when it has one',
+    applyMatchedFactors({'org.gnome.TextEditor': 0.9}, 0.45, gains, ['zotero.desktop'], ref),
+    {'org.gnome.TextEditor': 0.9, 'zotero': 0.45});
+check('nothing to change returns null',
+    applyMatchedFactors({'zotero': 0.23}, 0.45, gains, ['zotero.desktop'], ref), null);
+check('no measured reference returns null',
+    applyMatchedFactors({}, 0.45, {'zotero.desktop': 4.0}, ['zotero.desktop'], ref), null);
+check('the reference itself is never rewritten',
+    applyMatchedFactors({}, 0.45, gains, [ref], ref), null);
+check('unmeasured matched apps are skipped',
+    applyMatchedFactors({}, 0.45, gains, ['missing.desktop', 'zotero.desktop'], ref), {'zotero': 0.23});
+check('rules and other apps are left alone',
+    applyMatchedFactors({'chrome-*-Default': 0.08, 'firefox': 0.3}, 0.45, gains, ['zotero.desktop'], ref),
+    {'chrome-*-Default': 0.08, 'firefox': 0.3, 'zotero': 0.23});
+const input = {'zotero': 1.0};
+applyMatchedFactors(input, 0.45, gains, ['zotero.desktop'], ref);
+check('input dictionary is not modified', input, {'zotero': 1.0});
 
 print(`${count - failures}/${count} passed`);
 if (failures) imports.system.exit(1);

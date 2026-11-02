@@ -19,10 +19,12 @@ RELEASE_FILES=(
     CONTRIBUTING.md
     LICENSE
     README.md
+    calibration.js
     extension.js
     factorResolver.js
     metadata.json
     prefs.js
+    scrollShift.js
     schemas/org.gnome.shell.extensions.touchpad-speed-control.gschema.xml
     wsf.js
 )
