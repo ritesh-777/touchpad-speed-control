@@ -29,6 +29,10 @@ import { measureWindowGain } from './calibration.js';
 import { applyMatchedFactors, horizontalMatchingGains, resolveFactor } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
 
+// A horizontal measurement this many times faster or slower than the app's
+// vertical one is rejected as not a real sideways scroll
+const MAX_AXIS_RATIO = 3;
+
 // Verbose logging, controlled by the debug-logging setting (General tab)
 let debugLogging = false;
 
@@ -707,12 +711,21 @@ export default class TouchpadSpeedControlExtension extends Extension {
             const result = await measureWindowGain(window, line => log('Calibrate ' + appId + ': ' + line), saveDir, false);
             if (!this._settings) return;
 
+            // Apps scroll about as far sideways as vertically. A far larger or
+            // smaller result means something else moved: a sideways swipe that
+            // navigated back or forward, or a grid of identical icons lining up.
+            const gains = this._settings.get_value('scroll-gains').deep_unpack();
+            const ratio = gains[appId] ? result.gain / gains[appId] : 1;
+            if (ratio > MAX_AXIS_RATIO || ratio < 1 / MAX_AXIS_RATIO) {
+                throw new Error(`it moved ${result.gain.toFixed(1)} px per unit sideways but ${gains[appId].toFixed(1)} vertically, ` +
+                    'so the content probably changed instead of scrolling; try a wide table, long lines or a zoomed image');
+            }
+
             const hGains = this._settings.get_value('h-scroll-gains').deep_unpack();
             hGains[appId] = result.gain;
             this._settings.set_value('h-scroll-gains', new GLib.Variant('a{sd}', hGains));
             log('Calibrate ' + appId + ': horizontal gain ' + result.gain.toFixed(3));
 
-            const gains = this._settings.get_value('scroll-gains').deep_unpack();
             const reference = this._settings.get_string('scroll-reference');
             let detail;
             if (appId === reference) {
