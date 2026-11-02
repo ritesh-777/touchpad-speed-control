@@ -37,14 +37,51 @@ const STRIP_WIDTH_PX = 240;
 // Largest disagreement accepted between the two measurements
 const MAX_MISMATCH = 0.2;
 
-function _sleep(ms) {
-    return new Promise(resolve => {
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+// Pending waits, so cancelCalibration() can remove their main loop sources
+// when the extension is disabled (for example when the screen locks)
+const _pendingWaits = new Map();
+let _cancelled = false;
+
+/**
+ * Waits `ms` milliseconds. Rejects if cancelCalibration() is called first.
+ *
+ * @param {number} ms - Milliseconds to wait.
+ * @returns {Promise<void>}
+ */
+export function wait(ms) {
+    if (_cancelled) return Promise.reject(new Error('calibration was cancelled'));
+    return new Promise((resolve, reject) => {
+        const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            _pendingWaits.delete(id);
             resolve();
             return GLib.SOURCE_REMOVE;
         });
+        _pendingWaits.set(id, reject);
     });
 }
+
+/**
+ * Stops any measurement in progress: removes its pending timeouts and makes
+ * further waits fail, so nothing keeps running after the extension is
+ * disabled. A measurement interrupted this way may leave the page scrolled.
+ */
+export function cancelCalibration() {
+    _cancelled = true;
+    for (const [id, reject] of _pendingWaits) {
+        GLib.source_remove(id);
+        reject(new Error('calibration was cancelled'));
+    }
+    _pendingWaits.clear();
+}
+
+/**
+ * Allows measurements again after cancelCalibration() (on enable).
+ */
+export function resetCalibration() {
+    _cancelled = false;
+}
+
+const _sleep = wait;
 
 function _nowUs() {
     return GLib.get_monotonic_time();
@@ -55,9 +92,10 @@ function _nowUs() {
  * signatures, for horizontal scrolling), averaged down to roughly logical
  * resolution on scaled displays.
  *
- * @returns {Promise<{rows: Float32Array[], scale: number, png: GLib.Bytes}>}
- *   Signatures per row (or column), captured pixels per logical pixel after
- *   averaging, and the captured PNG.
+ * The capture stays in memory and is dropped once its signatures are made.
+ *
+ * @returns {Promise<{rows: Float32Array[], scale: number}>} Signatures per
+ *   row (or column), and captured pixels per logical pixel after averaging.
  */
 async function _captureRows(x, y, width, height, vertical) {
     const shooter = new Shell.Screenshot();
@@ -65,9 +103,8 @@ async function _captureRows(x, y, width, height, vertical) {
     await shooter.screenshot_area(x, y, width, height, stream);
     stream.close(null);
 
-    const png = stream.steal_as_bytes();
     const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(
-        Gio.MemoryInputStream.new_from_bytes(png), null);
+        Gio.MemoryInputStream.new_from_bytes(stream.steal_as_bytes()), null);
     const rows = (vertical ? rowSignatures : columnSignatures)(
         pixbuf.read_pixel_bytes().toArray(),
         pixbuf.get_width(),
@@ -78,21 +115,7 @@ async function _captureRows(x, y, width, height, vertical) {
     // averaged back to logical pixels, and the search runs scale² faster
     const scale = pixbuf.get_height() / height;
     const factor = Math.max(1, Math.round(scale));
-    return {rows: downsampleRows(rows, factor), scale: scale / factor, png};
-}
-
-// Saves a failed step's captures for diagnosis (debug logging only)
-function _saveCaptures(dir, label, before, after) {
-    try {
-        GLib.mkdir_with_parents(dir, 0o700);
-        for (const [name, capture] of [['before', before], ['after', after]]) {
-            Gio.File.new_for_path(GLib.build_filenamev([dir, `${label}-${name}.png`]))
-                .replace_contents_bytes_async(capture.png, null, false,
-                    Gio.FileCreateFlags.PRIVATE | Gio.FileCreateFlags.REPLACE_DESTINATION, null, null);
-        }
-    } catch (e) {
-        console.warn('[TouchpadSpeed] could not save calibration captures: ' + e.message);
-    }
+    return {rows: downsampleRows(rows, factor), scale: scale / factor};
 }
 
 async function _scroll(device, units, vertical) {
@@ -114,14 +137,12 @@ async function _scroll(device, units, vertical) {
 // Scrolls `units` and returns how far the content in the area moved, in
 // logical px (positive = moved up, or left), or null if no shift matched
 // clearly, plus whether anything moved at all (so the step needs undoing).
-// With `saveDir`, the captures of a step without a clear match are saved there.
-async function _measureShift(device, area, units, vertical, saveDir, label) {
+async function _measureShift(device, area, units, vertical) {
     const before = await _captureRows(area.x, area.y, area.width, area.height, vertical);
     await _scroll(device, units, vertical);
     await _sleep(SETTLE_MS);
     const after = await _captureRows(area.x, area.y, area.width, area.height, vertical);
     const result = estimateShift(before.rows, after.rows);
-    if (!result && saveDir) _saveCaptures(saveDir, label, before, after);
     const shift = result ? result.shift / before.scale : null;
     const moved = shift !== null ? Math.abs(shift) >= 0.5 : !isUnchanged(before.rows, after.rows);
     return {shift, moved};
@@ -175,13 +196,11 @@ async function _measureDirection(measure, direction) {
  *   under its centre that scrolls on that axis, at least a screen long (or
  *   wide).
  * @param {function(string)} [log] - Receives a line per measurement step.
- * @param {string} [saveDir] - Where to save the captures of steps that found
- *   no clear match, for diagnosis. Nothing is saved without it.
  * @param {boolean} [vertical] - Measure vertical (default) or horizontal scrolling.
  * @returns {Promise<{gain: number, shifts: number[], units: number[]}>}
  * @throws {Error} If no reliable gain could be measured in either direction.
  */
-export async function measureWindowGain(window, log = () => {}, saveDir = null, vertical = true) {
+export async function measureWindowGain(window, log = () => {}, vertical = true) {
     const rect = window.get_frame_rect();
     // A central strip: across the window for vertical scrolling (skipping
     // the header bar / toolbars at the top), along it for horizontal
@@ -207,11 +226,8 @@ export async function measureWindowGain(window, log = () => {}, saveDir = null, 
     const [pointerX, pointerY] = global.get_pointer();
 
     let scrolled = 0;
-    let step = 0;
     const measure = async units => {
-        step++;
-        const label = `${vertical ? 'v' : 'h'}-step${step}-${units}units`;
-        const {shift, moved} = await _measureShift(device, area, units, vertical, saveDir, label);
+        const {shift, moved} = await _measureShift(device, area, units, vertical);
         // Only steps that moved the content are undone: one at the content's
         // end did nothing, and undoing it would overshoot
         if (moved) scrolled += units;
@@ -237,8 +253,13 @@ export async function measureWindowGain(window, log = () => {}, saveDir = null, 
             }
         }
     } finally {
-        if (scrolled)
-            await _scroll(device, -scrolled, vertical);
-        device.notify_absolute_motion(_nowUs(), pointerX, pointerY);
+        // Undoing the scroll waits between steps, so it is skipped (or stops)
+        // when the measurement was cancelled; the pointer goes back either way
+        try {
+            if (scrolled && !_cancelled)
+                await _scroll(device, -scrolled, vertical);
+        } finally {
+            device.notify_absolute_motion(_nowUs(), pointerX, pointerY);
+        }
     }
 }
