@@ -1,6 +1,6 @@
 // Unit tests for factorResolver.js. Run with: gjs -m tests/factorResolver.test.js
 
-import {applyMatchedFactors, factorForGain, horizontalMatchingGains, isPattern, matchesPattern, normalizeAppId, resolveFactor, validatePattern} from '../factorResolver.js';
+import {applyMatchedFactors, calibrationFromJson, factorForGain, horizontalMatchingGains, isPattern, matchesPattern, normalizeAppId, resolveFactor, validatePattern} from '../factorResolver.js';
 
 let failures = 0;
 let count = 0;
@@ -123,6 +123,25 @@ check('apps without a horizontal measurement keep the vertical gain', hGains['zo
 check('reference keeps its vertical gain', hGains[hRef], 2.0);
 check('horizontal ratio drives the horizontal factor',
     applyMatchedFactors({}, 0.5, hGains, ['google-chrome.desktop'], hRef), {'google-chrome': 0.1});
+
+// calibrationFromJson
+check('missing section', calibrationFromJson(undefined), null);
+check('not an object', calibrationFromJson([1, 2]), null);
+check('round trip of a valid section', calibrationFromJson({
+    gains: {'a.desktop': 2.0, 'b.desktop': 13.1},
+    horizontal_gains: {'b.desktop': 12.0},
+    reference: 'a.desktop',
+    matched: ['b.desktop'],
+}), {gains: {'a.desktop': 2.0, 'b.desktop': 13.1}, horizontalGains: {'b.desktop': 12.0}, reference: 'a.desktop', matched: ['b.desktop']});
+check('bad values are dropped', calibrationFromJson({
+    gains: {'a.desktop': 2.0, 'bad.desktop': -1, 'nan.desktop': 'x'},
+    horizontal_gains: 'nope',
+    reference: 'unmeasured.desktop',
+    matched: ['a.desktop', 'a.desktop', 7, 'bad.desktop'],
+}), {gains: {'a.desktop': 2.0}, horizontalGains: {}, reference: '', matched: ['a.desktop']});
+check('the reference is not also matched', calibrationFromJson({
+    gains: {'a.desktop': 2.0}, reference: 'a.desktop', matched: ['a.desktop'],
+}).matched, []);
 
 print(`${count - failures}/${count} passed`);
 if (failures) imports.system.exit(1);

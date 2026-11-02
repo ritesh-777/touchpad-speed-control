@@ -206,6 +206,35 @@ export function horizontalMatchingGains(gains, horizontalGains, reference) {
     return result;
 }
 
+/**
+ * Reads the calibration section of an exported settings file, keeping only
+ * well-formed entries (positive gains, string IDs).
+ *
+ * @param {*} section - The `calibration` value from the JSON file.
+ * @returns {{gains: Object<string, number>, horizontalGains: Object<string, number>,
+ *   reference: string, matched: string[]}|null} The calibration, or null if
+ *   the section is missing or not an object.
+ */
+export function calibrationFromJson(section) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return null;
+
+    const gainsFrom = value => {
+        const gains = {};
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            for (const [appId, gain] of Object.entries(value)) {
+                if (typeof gain === 'number' && Number.isFinite(gain) && gain > 0) gains[appId] = gain;
+            }
+        }
+        return gains;
+    };
+    const gains = gainsFrom(section.gains);
+    const reference = typeof section.reference === 'string' && gains[section.reference] ? section.reference : '';
+    const matched = Array.isArray(section.matched)
+        ? [...new Set(section.matched.filter(id => typeof id === 'string' && gains[id] && id !== reference))]
+        : [];
+    return {gains, horizontalGains: gainsFrom(section.horizontal_gains), reference, matched};
+}
+
 function _literalLength(pattern) {
     return pattern.replace(/[*?]/g, '').length;
 }

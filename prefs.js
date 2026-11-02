@@ -20,7 +20,7 @@ import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import { applyMatchedFactors, horizontalMatchingGains, isPattern, normalizeAppId, resolveFactor, validatePattern } from './factorResolver.js';
+import { applyMatchedFactors, calibrationFromJson, horizontalMatchingGains, isPattern, normalizeAppId, resolveFactor, validatePattern } from './factorResolver.js';
 import { findWSFPath, isWSFActive } from './wsf.js';
 
 /**
@@ -440,6 +440,41 @@ export default class TouchpadSpeedControlPreferences extends ExtensionPreference
         debugLogBox.append(debugLogSwitch);
         debugLogRow.set_child(debugLogBox);
         debugGroup.add(debugLogRow);
+
+        const quickRow = new Adw.PreferencesRow({ activatable: false });
+        const quickBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+            margin_start: 12,
+            margin_end: 12,
+            margin_top: 8,
+            margin_bottom: 8
+        });
+        const quickLabels = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            hexpand: true
+        });
+        quickLabels.append(new Gtk.Label({
+            label: _('Quick Settings tile'),
+            xalign: 0
+        }));
+        quickLabels.append(new Gtk.Label({
+            label: _('Shows the applied speeds, with − / + for the focused app and the calibration actions in its menu.'),
+            xalign: 0,
+            wrap: true,
+            css_classes: ['dim-label', 'caption']
+        }));
+        const quickSwitch = new Gtk.Switch({
+            active: window._settings.get_boolean('show-quick-settings'),
+            valign: Gtk.Align.CENTER
+        });
+        quickSwitch.connect('notify::active', () => {
+            window._settings.set_boolean('show-quick-settings', quickSwitch.get_active());
+        });
+        quickBox.append(quickLabels);
+        quickBox.append(quickSwitch);
+        quickRow.set_child(quickBox);
+        generalGroup.add(quickRow);
 
         // Import/Export: add buttons at the bottom of the General group
         const ioBox = new Gtk.Box({
@@ -1223,8 +1258,8 @@ class Settings {
         this._calibrationGroup = new Adw.PreferencesGroup({
             title: _('Calibration'),
             description: _('Match apps to one reference app so a swipe scrolls the same distance everywhere. ' +
-                'To measure an app, turn on the panel indicator (below), open a long page in the app, click into it, ' +
-                'and choose "Use … as scroll reference" or "Match …" from the indicator\'s menu. ' +
+                'To measure an app, open a long page in it, click into it, and choose "Use … as scroll reference" or ' +
+                '"Match …" from the Touchpad Speed tile in Quick Settings (or the panel indicator\'s menu). ' +
                 'For horizontal scrolling, also choose "Measure horizontal scrolling" on something that scrolls sideways ' +
                 '(a wide table, long lines, Files\' column view); apps without it use their vertical ratio for both axes.')
         });
@@ -1669,6 +1704,12 @@ class Settings {
             horizontal: {
                 global_factor: this.schema.get_double('h-global-factor'),
                 app_factors: this.schema.get_value('h-app-factors').deep_unpack()
+            },
+            calibration: {
+                gains: this.schema.get_value('scroll-gains').deep_unpack(),
+                horizontal_gains: this.schema.get_value('h-scroll-gains').deep_unpack(),
+                reference: this.schema.get_string('scroll-reference'),
+                matched: this.schema.get_strv('matched-apps')
             }
         };
 
@@ -1763,6 +1804,16 @@ class Settings {
                             }
                             const hVariant = new GLib.Variant('a{sd}', filtered);
                             this.schema.set_value('h-app-factors', hVariant);
+                        }
+
+                        // Files exported before calibration existed have no section;
+                        // keep the current calibration then
+                        const calibration = calibrationFromJson(data.calibration);
+                        if (calibration) {
+                            this.schema.set_value('scroll-gains', new GLib.Variant('a{sd}', calibration.gains));
+                            this.schema.set_value('h-scroll-gains', new GLib.Variant('a{sd}', calibration.horizontalGains));
+                            this.schema.set_string('scroll-reference', calibration.reference);
+                            this.schema.set_strv('matched-apps', calibration.matched);
                         }
 
                         this.refreshAppList();
