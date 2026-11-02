@@ -1,6 +1,6 @@
 // Unit tests for scrollShift.js. Run with: gjs -m tests/scrollShift.test.js
 
-import {columnSignatures, downsampleRows, estimateShift, rowSignatures} from '../scrollShift.js';
+import {columnSignatures, downsampleRows, estimateShift, isUnchanged, rowSignatures} from '../scrollShift.js';
 
 let failures = 0;
 let count = 0;
@@ -96,6 +96,12 @@ const sideways = estimateShift(captureSideways(100, 300), captureSideways(143, 3
 check('scrolled right 43 (column signatures)', sideways ? sideways.shift : null, 43);
 const sidewaysBack = estimateShift(captureSideways(200, 300), captureSideways(170, 300));
 check('scrolled left 30 (column signatures)', sidewaysBack ? sidewaysBack.shift : null, -30);
+
+check('identical captures are unchanged', isUnchanged(capture(100, 300), capture(100, 300)), true);
+check('a small animated corner still counts as unchanged',
+    isUnchanged(captureWithAnimation(100, 300, 0, 20, 2654435761), captureWithAnimation(100, 300, 0, 20, 40503)), true);
+check('scrolled content is not unchanged', isUnchanged(capture(100, 300), capture(130, 300)), false);
+check('different content is not unchanged', isUnchanged(capture(100, 300), capture(2000, 300)), false);
 
 const blank = rowSignatures(new Uint8Array(4 * 50 * 100).fill(255), 50, 100, 200, 4);
 check('blank content gives no result', estimateShift(blank, blank), null);

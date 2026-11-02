@@ -145,6 +145,20 @@ function _detail(rows) {
 }
 
 /**
+ * Whether two captures show the same content in the same place, apart from
+ * small changes (a blinking cursor, an animated corner). Used to tell a step
+ * that did not move at all from one that moved in a way no shift explains.
+ *
+ * @param {Float32Array[]} before - Signatures before scrolling.
+ * @param {Float32Array[]} after - Signatures after scrolling.
+ * @returns {boolean} True if nothing moved.
+ */
+export function isUnchanged(before, after) {
+    if (before.length !== after.length || before.length === 0) return false;
+    return _matchingError(before, after, 0) <= Math.max(0.5, _detail(before) * 0.1);
+}
+
+/**
  * Finds the vertical shift that best maps `before` onto `after`.
  *
  * A positive shift means the content moved up (scrolled down) by that many

@@ -23,7 +23,7 @@ import GdkPixbuf from 'gi://GdkPixbuf';
 import Clutter from 'gi://Clutter';
 import Shell from 'gi://Shell';
 
-import { columnSignatures, downsampleRows, estimateShift, rowSignatures } from './scrollShift.js';
+import { columnSignatures, downsampleRows, estimateShift, isUnchanged, rowSignatures } from './scrollShift.js';
 
 // Scroll sent per event and the pause between events. Slow enough that
 // apps add little or no kinetic scrolling after the finish event.
@@ -113,8 +113,8 @@ async function _scroll(device, units, vertical) {
 
 // Scrolls `units` and returns how far the content in the area moved, in
 // logical px (positive = moved up, or left), or null if no shift matched
-// clearly. With `saveDir`, the captures of a step without a clear match are
-// saved there.
+// clearly, plus whether anything moved at all (so the step needs undoing).
+// With `saveDir`, the captures of a step without a clear match are saved there.
 async function _measureShift(device, area, units, vertical, saveDir, label) {
     const before = await _captureRows(area.x, area.y, area.width, area.height, vertical);
     await _scroll(device, units, vertical);
@@ -122,7 +122,9 @@ async function _measureShift(device, area, units, vertical, saveDir, label) {
     const after = await _captureRows(area.x, area.y, area.width, area.height, vertical);
     const result = estimateShift(before.rows, after.rows);
     if (!result && saveDir) _saveCaptures(saveDir, label, before, after);
-    return result ? result.shift / before.scale : null;
+    const shift = result ? result.shift / before.scale : null;
+    const moved = shift !== null ? Math.abs(shift) >= 0.5 : !isUnchanged(before.rows, after.rows);
+    return {shift, moved};
 }
 
 // One measurement in one direction (1 = down or right, -1 = up or left): finds a scroll
@@ -209,9 +211,10 @@ export async function measureWindowGain(window, log = () => {}, saveDir = null, 
     const measure = async units => {
         step++;
         const label = `${vertical ? 'v' : 'h'}-step${step}-${units}units`;
-        const shift = await _measureShift(device, area, units, vertical, saveDir, label);
-        // A step that clearly did not move (content at its end) needs no undo
-        if (shift === null || Math.abs(shift) >= 0.5) scrolled += units;
+        const {shift, moved} = await _measureShift(device, area, units, vertical, saveDir, label);
+        // Only steps that moved the content are undone: one at the content's
+        // end did nothing, and undoing it would overshoot
+        if (moved) scrolled += units;
         log(`scrolled ${units} units ${vertical ? 'vertically' : 'horizontally'}: ` +
             `content moved ${shift === null ? 'no clear match' : shift.toFixed(1) + ' px'}`);
         return shift;
